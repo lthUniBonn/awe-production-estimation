@@ -1,4 +1,4 @@
-from pyOpt import Optimization, SLSQP, Gradient
+from pyoptsparse import Optimization, SLSQP, Gradient
 from scipy import optimize as op
 import numpy as np
 import matplotlib.pyplot as plt
@@ -46,17 +46,22 @@ def read_slsqp_output_file(print_details=True):
 
 def convert_optimization_result(op_sol, nit, nfev, njev, print_details, iprint):
     """Write pyOpt's optimization results to the same format as the output of SciPy's minimize function."""
+    x = []
+    for varname in op_sol.variables:
+        for var in op_sol.variables[varname]:
+            if var.type in ["c", "i"]:
+                x.append(var.value)
     op_res = {
-        'x': [v.value for v in op_sol._variables.values()],
-        'success': op_sol.opt_inform['value'] == 0,
-        'message': op_sol.opt_inform['text'],
-        'fun': op_sol._objectives[0].value,
+        'x': x,
+        'success': op_sol.optInform['value'] == 0,
+        'message': op_sol.optInform['text'],
+        'fun': op_sol.objectives['obj'].value,
         'nit': nit,
         'nfev': nfev,
         'njev': njev,
     }
     if print_details:
-        print("{}    (Exit mode {})".format(op_res['message'], op_sol.opt_inform['value']))
+        print("{}    (Exit mode {})".format(op_res['message'], op_sol.optInform['value']))
         print("            Current function value: {}".format(op_res['fun']))
         if iprint:
             print("            Iterations: {}".format(nit))
@@ -81,9 +86,9 @@ class Optimizer:
         self.environment_state = environment_state
 
         # Optimization configuration.
-        self.use_library = 'pyopt'  # Either 'pyopt' or 'scipy' can be opted. pyOpt is in general faster, however more
+        self.use_library = 'pyOptSparse'  # Either 'pyOptSparse' or 'scipy' can be opted. pyOptSparse is in general faster, however more
         # cumbersome to install.
-        self.use_parallel_processing = False  # Only compatible with pyOpt: used for determining the gradient. Script
+        self.use_parallel_processing = False  #TODO Only compatible with pyOpt: used for determining the gradient. Script
         # should be run using: mpiexec -n 4 python script.py, when using parallel processing. Parallel processing does
         # not speed up solving the problem when only a limited number of processors are available.
 
@@ -137,15 +142,16 @@ class Optimizer:
 
     def eval_fun_pyopt(self, x, *args):
         """PyOpt's implementation of SLSQP can produce NaN's in the optimization vector or contain values that violate
-        the bounds."""
-        if np.isnan(x).any():
+        the bounds. true for pyoptsparse? #TODO"""
+        x_vals = [v for k,v in x.items()]
+        if np.isnan(x_vals).any():
             raise OptimizerError("Optimization vector contains NaN's.")
 
         if self.reduce_x is not None:
             x_full = self.x0.copy()
-            x_full[self.reduce_x] = x
+            x_full[self.reduce_x] = x_vals
         else:
-            x_full = x
+            x_full = x_vals
 
         bounds_adhered = (x_full - self.bounds_real_scale[:, 0]*self.scaling_x >= -1e6).all() and \
                          (x_full - self.bounds_real_scale[:, 1]*self.scaling_x <= 1e6).all()
@@ -153,8 +159,13 @@ class Optimizer:
             raise OptimizerError("Optimization bounds violated.")
 
         obj, ineq_cons = self.eval_fun(x_full, *args)
+        funcs = {}
+        funcs['obj'] = obj
+        # constraints old: [-c for c in ineq_cons]
+        for idx, i_c in enumerate(self.reduce_ineq_cons):
+            funcs['g{}'.format(i_c)] = -ineq_cons[idx]
 
-        return obj, [-c for c in ineq_cons], 0
+        return funcs, 0
 
     def obj_fun(self, x, *args):
         """Scipy's implementation of SLSQP uses separate functions for the objective and constraints. Since the
@@ -232,9 +243,9 @@ class Optimizer:
             }
             self.op_res = dict(op.minimize(self.obj_fun, starting_point, args=args, bounds=bounds, method='SLSQP',
                                            options=options, callback=self.callback_fun_scipy, constraints=cons))
-        elif self.use_library == 'pyopt':
+        elif self.use_library == 'pyOptSparse':
             op_problem = Optimization('Pumping cycle power', self.eval_fun_pyopt)
-            op_problem.addObj('f')
+            op_problem.addObj('obj') #TODO was 'f' - why?
 
             if self.reduce_x is None:
                 x_range = range(len(self.x0))
@@ -244,8 +255,7 @@ class Optimizer:
                 op_problem.addVar('x{}'.format(i_x), 'c', lower=b[0], upper=b[1], value=xi0)
 
             for i_c in self.reduce_ineq_cons:
-                op_problem.addCon('g{}'.format(i_c), 'i')
-
+                op_problem.addCon('g{}'.format(i_c))#, 'i')TODO - inequality, express in upper/lower?
             if self.use_parallel_processing:
                 sens_mode = 'pgc'
             else:
@@ -263,8 +273,7 @@ class Optimizer:
             optimizer.setOption('MAXIT', maxiter)
             optimizer.setOption('ACC', ftol)
 
-            optimizer(op_problem, sens_type='FD', sens_mode=sens_mode, sens_step=eps, *args)
-            op_sol = op_problem.solution(0)
+            op_sol = optimizer(op_problem, sens='FD', sensMode=sens_mode, sensStep=eps, *args)
 
             if iprint == 1:
                 nit, nfev, njev = read_slsqp_output_file(print_details)
@@ -281,7 +290,6 @@ class Optimizer:
             res_x = self.x0.copy()
             res_x[self.reduce_x] = self.op_res['x']
         self.x_opt_real_scale = res_x/self.scaling_x
-
         return self.x_opt_real_scale
 
     def plot_opt_evolution(self):
@@ -532,7 +540,6 @@ class OptimizerCycle(Optimizer):
         else:
             x_real_scale = x
         res = self.eval_performance_indicators(x_real_scale, **kwargs)
-
         # Prepare the simulation by updating simulation parameters.
         env_state = self.environment_state
         env_state.calculate(100.)
@@ -540,7 +547,6 @@ class OptimizerCycle(Optimizer):
 
         # Determine optimization objective and constraints.
         obj = -res['average_power']['cycle']/power_wind_100m/self.system_properties.kite_projected_area
-
         # When speed limits are active during the optimization (see determine_new_steady_state method of Phase
         # class in qsm.py), the setpoint reel-out/reel-in forces are overruled. For special cases, the respective
         # optimization variables won't affect the simulation. The lower constraints avoid random steps between
@@ -566,7 +572,6 @@ class OptimizerCycle(Optimizer):
 
         ineq_cons = np.array([force_out_setpoint_min, force_in_setpoint_max, ineq_cons_traction_max_force,
                               ineq_cons_cw_patterns])
-
         return obj, ineq_cons
 
     def eval_performance_indicators(self, x_real_scale, plot_result=False, relax_errors=True):
@@ -662,6 +667,7 @@ def test():
     }
     oc = OptimizerCycle(cycle_sim_settings, sys_props_v3, env_state, reduce_x=np.array([0, 1, 2, 3]))
     oc.x0_real_scale = np.array([4500, 1000, 30*np.pi/180., 150, 230])
+    print('Optimization on:', oc.x0_real_scale)
     print(oc.optimize())
     oc.eval_point(True)
     plt.show()
