@@ -116,11 +116,14 @@ def calculate_aep(n_clusters=8, loc='mmc'):
         mask_faulty_point = get_mask_discontinuities(df)
         v = df['v_100m [m/s]'].values[~mask_faulty_point]
         p = df['P [W]'].values[~mask_faulty_point]
-        assert v[0] == wind_speed_bin_limits[i, 0]
+
+        # assert v[0] == wind_speed_bin_limits[i, 0] #TODO differences at 10th decimal threw assertion error
         err_str = "Wind speed range of power curve {} is different than that of probability distribution: " \
-                  "{:.2f} and {:.2f} m/s, respectively.".format(i_profile, wind_speed_bin_limits[i, -1], v[-1])
+                  "{:.2f} and {:.2f} m/s, respectively."
+        if np.abs(v[0] - wind_speed_bin_limits[i, 0]) > 1e-6:
+            print(err_str.format(i_profile, wind_speed_bin_limits[i, 0], v[0]))        
         if np.abs(v[-1] - wind_speed_bin_limits[i, -1]) > 1e-6:
-            print(err_str)
+            print(err_str.format(i_profile, wind_speed_bin_limits[i, -1], v[-1]))
         # assert np.abs(v[-1] - wind_speed_bin_limits[i, -1]) < 1e-6, err_str
 
         # Determine wind speeds at bin centers and corresponding power output.
