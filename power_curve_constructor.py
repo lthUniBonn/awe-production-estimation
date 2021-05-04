@@ -4,6 +4,9 @@ import numpy as np
 import pickle
 
 from qsm import SteadyStateError, OperationalLimitViolation, PhaseError
+
+from cycle_optimizer import OptimizerError
+
 from utils import flatten_dict
 
 
@@ -23,7 +26,12 @@ class PowerCurveConstructor:
 
         print("x0:", x0)
         power_optimizer.x0_real_scale = x0
-        x_opt = power_optimizer.optimize()
+        try:
+            x_opt = power_optimizer.optimize()
+        except OptimizerError as e:
+            print("Optimization finished with an error: {}".format(e))
+            raise e
+            return {}, False
         self.x0.append(x0)
         self.x_opts.append(x_opt)
         self.optimization_details.append(power_optimizer.op_res)
@@ -31,9 +39,9 @@ class PowerCurveConstructor:
         try:
             cons, kpis = power_optimizer.eval_point()
             sim_successful = True
-        except (SteadyStateError, OperationalLimitViolation, PhaseError) as e:
+        except (SteadyStateError, OperationalLimitViolation, PhaseError) as e: #TODO why can these be caught again later? 
             print("Error occurred while evaluating the resulting optimal point: {}".format(e))
-            cons, kpis = power_optimizer.eval_point(relax_errors=True)
+            cons, kpis = power_optimizer.eval_point(relax_errors=True) # TODO why not return here? kpis will be appended then even though it is wrong? 
             sim_successful = False
 
         print("cons:", cons)
@@ -62,13 +70,15 @@ class PowerCurveConstructor:
             print("[{}] Processing v={:.2f}m/s".format(i, vw))
             try:
                 x_opt, sim_successful = self.run_optimization(vw, power_optimizer, x0_next)
-            except (OperationalLimitViolation, SteadyStateError, PhaseError):
+            except (OperationalLimitViolation, SteadyStateError, PhaseError, OptimizerError) as e:
                 try:  # Retry for a slightly different wind speed.
+                    print('first optimization/simulation ended in error: {}'.format(e))
+                    print('run with varied wind speed:', vw+1e-2)
                     x_opt, sim_successful = self.run_optimization(vw+1e-2, power_optimizer, x0_next)
                     self.wind_speeds[i] = vw+1e-2
-                except (OperationalLimitViolation, SteadyStateError, PhaseError):
+                except (OperationalLimitViolation, SteadyStateError, PhaseError, OptimizerError):
                     self.wind_speeds = self.wind_speeds[:i]
-                    print("Optimization sequence stopped prematurely due to failed optimization. {:.1f} m/s is the "
+                    print("Optimization sequence stopped prematurely due to failed optimization. {:.2f} m/s is the "
                           "highest wind speed for which the optimization was successful.".format(self.wind_speeds[-1]))
                     break
 
@@ -127,7 +137,7 @@ class PowerCurveConstructor:
         xf, x0 = self.x_opts, self.x0
         cons = self.constraints
         kpis, opt_details = self.performance_indicators, self.optimization_details
-        try:
+        try: #TODO this seems to be ineffective code? 
             performance_indicators = next(list(flatten_dict(kpi)) for kpi in kpis if kpi is not None)
         except StopIteration:
             performance_indicators = []

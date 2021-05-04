@@ -6,10 +6,9 @@ import matplotlib.pyplot as plt
 from qsm import Cycle
 from utils import flatten_dict
 
-
 class OptimizerError(Exception):
+    """Exception raised for optimizations not finishing successfully with 0."""
     pass
-
 
 def read_slsqp_output_file(print_details=True):
     """Read relevant information from pyOpt's output file for the SLSQP algorithm."""
@@ -29,7 +28,7 @@ def read_slsqp_output_file(print_details=True):
                         ngrad_line = next(f)
                         break
                     else:
-                        x_iter.append(float(xi))
+                        x_iter.append(float(xi[7:15]))
                 if print_details:
                     print("Iter {}: x=".format(i_iter) + str(x_iter))
             elif line[:38] == "        NUMBER OF FUNC-CALLS:  NFUNC =":
@@ -86,7 +85,7 @@ class Optimizer:
         self.environment_state = environment_state
 
         # Optimization configuration.
-        self.use_library = 'pyOptSparse'  # Either 'pyOptSparse' or 'scipy' can be opted. pyOptSparse is in general faster, however more
+        self.use_library = 'pyOptSparse' #  'scipy' #   # Either 'pyOptSparse' or 'scipy' can be opted. pyOptSparse is in general faster, however more
         # cumbersome to install.
         self.use_parallel_processing = False  #TODO Only compatible with pyOpt: used for determining the gradient. Script
         # should be run using: mpiexec -n 4 python script.py, when using parallel processing. Parallel processing does
@@ -156,14 +155,16 @@ class Optimizer:
         bounds_adhered = (x_full - self.bounds_real_scale[:, 0]*self.scaling_x >= -1e6).all() and \
                          (x_full - self.bounds_real_scale[:, 1]*self.scaling_x <= 1e6).all()
         if not bounds_adhered:
-            raise OptimizerError("Optimization bounds violated.")
+            #raise OptimizerError("Optimization bounds violated.") #TODO keep this y/n? 
+            print('Optimization bounds VIOLATED. Diff to bounds:')
+            print('lower:', (x_full - self.bounds_real_scale[:, 0]*self.scaling_x >= -1e6))
+            print('upper:', (x_full - self.bounds_real_scale[:, 1]*self.scaling_x <= 1e6))
 
         obj, ineq_cons = self.eval_fun(x_full, *args)
         funcs = {}
         funcs['obj'] = obj
-        # constraints old: [-c for c in ineq_cons]
         for idx, i_c in enumerate(self.reduce_ineq_cons):
-            funcs['g{}'.format(i_c)] = -ineq_cons[idx]
+            funcs['g{}'.format(i_c)] = ineq_cons[idx]
 
         return funcs, 0
 
@@ -207,7 +208,7 @@ class Optimizer:
             raise OptimizerError("Optimization vector contains nan's.")
         self.x_progress.append(x.copy())
 
-    def optimize(self, *args, maxiter=30, iprint=-1):
+    def optimize(self, *args, maxiter=30, iprint=0): # -1):
         """Perform optimization."""
         self.clear_result_attributes()
         # Construct scaled starting point and bounds
@@ -239,13 +240,13 @@ class Optimizer:
                 'maxiter': maxiter,
                 'ftol': ftol,
                 'eps': eps,
-                'iprint': iprint,
+                'iprint': iprint, # 1: show final summary
             }
             self.op_res = dict(op.minimize(self.obj_fun, starting_point, args=args, bounds=bounds, method='SLSQP',
                                            options=options, callback=self.callback_fun_scipy, constraints=cons))
         elif self.use_library == 'pyOptSparse':
             op_problem = Optimization('Pumping cycle power', self.eval_fun_pyopt)
-            op_problem.addObj('obj') #TODO was 'f' - why?
+            op_problem.addObj('obj')
 
             if self.reduce_x is None:
                 x_range = range(len(self.x0))
@@ -255,12 +256,13 @@ class Optimizer:
                 op_problem.addVar('x{}'.format(i_x), 'c', lower=b[0], upper=b[1], value=xi0)
 
             for i_c in self.reduce_ineq_cons:
-                op_problem.addCon('g{}'.format(i_c))#, 'i')TODO - inequality, express in upper/lower?
+                op_problem.addCon('g{}'.format(i_c), lower=0)
+                # force_out_setpoint_min, force_in_setpoint_max, ineq_cons_traction_max_force, ineq_cons_cw_patterns
             if self.use_parallel_processing:
                 sens_mode = 'pgc'
             else:
                 sens_mode = ''
-
+            # TODO update for pyoptsparse
             # grad = Gradient(op_problem, sens_type='FD', sens_mode=sens_mode, sens_step=eps)
             # f0, g0, _ = self.eval_fun_pyopt(starting_point)
             # grad_fun = lambda f, g: grad.getGrad(starting_point, {}, [f], g)
@@ -274,7 +276,7 @@ class Optimizer:
             optimizer.setOption('ACC', ftol)
 
             op_sol = optimizer(op_problem, sens='FD', sensMode=sens_mode, sensStep=eps, *args)
-
+            print(op_sol)
             if iprint == 1:
                 nit, nfev, njev = read_slsqp_output_file(print_details)
             else:
@@ -283,13 +285,18 @@ class Optimizer:
             self.op_res = convert_optimization_result(op_sol, nit, nfev, njev, print_details, iprint)
         else:
             raise ValueError("Invalid library provided.")
+        # Check if optimization terminated successfully
+        if not self.op_res['success']:
+            raise OptimizerError(self.op_res['message'])
 
+        # Extract optimization results in real scale
         if self.reduce_x is None:
             res_x = self.op_res['x']
         else:
             res_x = self.x0.copy()
             res_x[self.reduce_x] = self.op_res['x']
         self.x_opt_real_scale = res_x/self.scaling_x
+
         return self.x_opt_real_scale
 
     def plot_opt_evolution(self):
@@ -648,6 +655,8 @@ def test():
     from qsm import LogProfile, TractionPhaseHybrid
     from kitepower_kites import sys_props_v3
 
+    import time
+    since = time.time()
     env_state = LogProfile()
     env_state.set_reference_wind_speed(12.)
 
@@ -670,6 +679,8 @@ def test():
     print('Optimization on:', oc.x0_real_scale)
     print(oc.optimize())
     oc.eval_point(True)
+    time_elapsed = time.time() - since
+    print('Time lapsed: ', '\t{:.0f}m {:.0f}s'.format(time_elapsed // 60, time_elapsed % 60))
     plt.show()
 
 

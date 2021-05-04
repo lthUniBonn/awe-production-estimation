@@ -3,9 +3,7 @@ import pandas as pd
 import pickle
 import matplotlib.pyplot as plt
 
-
-wind_speed_probability_file = "wind_resource/freq_distribution_v3{}.pickle"
-power_curve_file = 'output/power_curve{}{}.csv'
+from config import file_name_freq_distr, power_curve_output_file_name
 
 
 def get_mask_discontinuities(df):
@@ -23,10 +21,8 @@ def plot_power_and_wind_speed_probability_curves(n_clusters=8, loc='mmc', post_p
     fig, ax = plt.subplots(2, 1, sharex=True, figsize=(5.5, 4))
     plt.subplots_adjust(top=0.991, bottom=0.118, left=0.21, right=0.786)
 
-    suffix = "_{}{}".format(n_clusters, loc)
-
     n_bins = 100
-    with open(wind_speed_probability_file.format(suffix), 'rb') as f:
+    with open(file_name_freq_distr, 'rb') as f:
         wind_speed_distribution = pickle.load(f)[n_bins]
     wind_speed_bin_freq = wind_speed_distribution['freq_2d']
     wind_speed_bin_limits = wind_speed_distribution['v_bin_limits']
@@ -34,7 +30,8 @@ def plot_power_and_wind_speed_probability_curves(n_clusters=8, loc='mmc', post_p
     for i in range(n_clusters):
         # Plot power curve.
         i_profile = i + 1
-        df_power_curve = pd.read_csv(power_curve_file.format(suffix, i_profile), sep=";")
+        df_power_curve = pd.read_csv(power_curve_output_file_name.format(suffix='csv', i_profile=i_profile), sep=";")
+        #TODO exclude sin_successful = False 
         if post_process_curves:
             mask_faulty_point = get_mask_discontinuities(df_power_curve)
         else:
@@ -101,10 +98,9 @@ def calculate_aep(n_clusters=8, loc='mmc'):
     """Calculate the annual energy production for the requested cluster wind resource representation. Reads the wind
     speed distribution file, then the csv file of each power curve, post-processes the curve, and numerically integrates
     the product of the power and probability curves to determine the AEP."""
-    suffix = "_{}{}".format(n_clusters, loc)
 
     n_bins = 100
-    with open(wind_speed_probability_file.format(suffix), 'rb') as f:
+    with open(file_name_freq_distr, 'rb') as f:
         wind_speed_distribution = pickle.load(f)[n_bins]
     freq = wind_speed_distribution['freq_2d']
     wind_speed_bin_limits = wind_speed_distribution['v_bin_limits']
@@ -112,7 +108,7 @@ def calculate_aep(n_clusters=8, loc='mmc'):
     p_bins = np.zeros(freq.shape)
     for i in range(n_clusters):
         i_profile = i + 1
-        df = pd.read_csv(power_curve_file.format(suffix, i_profile), sep=";")
+        df = pd.read_csv(power_curve_output_file_name.format(suffix='csv', i_profile=i_profile), sep=";")
         mask_faulty_point = get_mask_discontinuities(df)
         v = df['v_100m [m/s]'].values[~mask_faulty_point]
         p = df['P [W]'].values[~mask_faulty_point]
@@ -130,6 +126,7 @@ def calculate_aep(n_clusters=8, loc='mmc'):
         v_bins = (wind_speed_bin_limits[i, :-1] + wind_speed_bin_limits[i, 1:])/2.
         p_bins[i, :] = np.interp(v_bins, v, p, left=0., right=0.)
 
+    # Weight profile energy production with the #TODO?? why not only n(cluster1, v_bin)/n_samples but n(cluster1, v_bin)/n(cluster1) 
     aep_bins = p_bins * freq/100. * 24*365
     aep_sum = np.sum(aep_bins)*1e-6
     print("AEP: {:.2f} MWh".format(aep_sum))

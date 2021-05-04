@@ -1,14 +1,19 @@
 import os
 import numpy as np
+import matplotlib as mpl
+mpl.use('Pdf')
 import matplotlib.pyplot as plt
 import pandas as pd
 from copy import deepcopy
 
+import sys, getopt
 from qsm import LogProfile, NormalisedWindTable1D, KiteKinematics, SteadyState, TractionPhaseHybrid, \
     TractionConstantElevation, SteadyStateError, TractionPhase
 from kitepower_kites import sys_props_v3
 from cycle_optimizer import OptimizerCycle
 from power_curve_constructor import PowerCurveConstructor
+
+from config import file_name_profiles, cut_wind_speeds_file, refined_cut_wind_speeds_file, power_curve_output_file_name
 
 # Assumptions representative reel-out state at cut-in wind speed.
 theta_ro_ci = 25 * np.pi / 180.
@@ -132,7 +137,7 @@ def get_cut_out_wind_speed(env=LogProfile()):
         beta -= dbeta
 
 
-def export_to_csv(v, v_cut_out, p, x_opts, n_cwp, i_profile, suffix):
+def export_to_csv(v, v_cut_out, p, x_opts, n_cwp, i_profile):
     df = {
         'v_100m [m/s]': v,
         'v/v_cut-out [-]': v/v_cut_out,
@@ -145,29 +150,29 @@ def export_to_csv(v, v_cut_out, p, x_opts, n_cwp, i_profile, suffix):
         'n_crosswind_patterns [-]': n_cwp,
     }
     df = pd.DataFrame(df)
-    df.to_csv('output/power_curve{}{}.csv'.format(suffix, i_profile), index=False, sep=";")
+    df.to_csv(power_curve_output_file_name.format(i_profile=i_profile, suffix='csv'), index=False, sep=";")
 
 
-def create_environment(suffix, i_profile):
+def create_environment(df, i_profile):
     """Flatten wind profile shapes resulting from the clustering and use to create the environment object."""
-    df = pd.read_csv('wind_resource/'+'profile{}{}.csv'.format(suffix, i_profile), sep=";")
     env = NormalisedWindTable1D()
-    env.heights = list(df['h [m]'])
-    env.normalised_wind_speeds = list((df['u1 [-]']**2 + df['v1 [-]']**2)**.5)
+    # velocities w.r.t. env.h_ref = 100.
+    env.heights = list(df['height [m]'])
+    env.normalised_wind_speeds = list((df['u{} [-]'.format(i_profile)]**2 + df['v{} [-]'.format(i_profile)]**2)**.5)
     return env
 
 
 def estimate_wind_speed_operational_limits(loc='mmc', n_clusters=8):
     """Estimate the cut-in and cut-out wind speeds for each wind profile shape. These wind speeds are refined when
     determining the power curves."""
-    suffix = '_{}{}'.format(n_clusters, loc)
 
     fig, ax = plt.subplots(1, 2, figsize=(5.5, 3), sharey=True)
     plt.subplots_adjust(top=0.92, bottom=0.164, left=0.11, right=0.788, wspace=0.13)
 
     res = {'vw_100m_cut_in': [], 'vw_100m_cut_out': [], 'tether_force_cut_in': []}
+    input_profiles = pd.read_csv(file_name_profiles, sep=";")
     for i_profile in range(1, n_clusters+1):
-        env = create_environment(suffix, i_profile)
+        env = create_environment(input_profiles, i_profile)
 
         # Get cut-in wind speed.
         vw_cut_in, _, tether_force_cut_in = get_cut_in_wind_speed(env)
@@ -196,8 +201,8 @@ def estimate_wind_speed_operational_limits(loc='mmc', n_clusters=8):
     df = pd.DataFrame(res)
     print(df)
 
-    if not os.path.exists('output/wind_limits_estimate{}.csv'.format(suffix)):
-        df.to_csv('output/wind_limits_estimate{}.csv'.format(suffix))
+    if not os.path.exists(cut_wind_speeds_file):
+        df.to_csv(cut_wind_speeds_file)
     else:
         print("Skipping exporting operational limits.")
 
@@ -211,8 +216,7 @@ def estimate_wind_speed_operational_limits(loc='mmc', n_clusters=8):
 
 def generate_power_curves(loc='mmc', n_clusters=8):
     """Determine power curves - requires estimates of the cut-in and cut-out wind speed to be available."""
-    suffix = '_{}{}'.format(n_clusters, loc)
-    limit_estimates = pd.read_csv('output/wind_limits_estimate{}.csv'.format(suffix))
+    limit_estimates = pd.read_csv(cut_wind_speeds_file)
 
     # Cycle simulation settings for different phases of the power curves.
     cycle_sim_settings_pc_phase1 = {
@@ -237,9 +241,10 @@ def generate_power_curves(loc='mmc', n_clusters=8):
 
     limits_refined = {'vw_100m_cut_in': [], 'vw_100m_cut_out': []}
     res_pcs = []
+    input_profiles = pd.read_csv(file_name_profiles, sep=";")
     for i_profile in range(1, n_clusters+1):
         # Pre-configure environment object for optimizations by setting normalized wind profile.
-        env = create_environment(suffix, i_profile)
+        env = create_environment(input_profiles, i_profile)
 
         # Optimizations are performed sequentially with increased wind speed. The solution of the previous optimization
         # is used to initialise the next. With trial and error the lower configuration, a reasonably robust approach is
@@ -282,7 +287,7 @@ def generate_power_curves(loc='mmc', n_clusters=8):
         # Start optimizations.
         pc = PowerCurveConstructor(wind_speeds)
         pc.run_predefined_sequence(op_seq, x0)
-        pc.export_results('output/power_curve{}{}.pickle'.format(suffix, i_profile))
+        pc.export_results(power_curve_output_file_name.format(i_profile=i_profile, suffix='pickle'))
         res_pcs.append(pc)
 
         # Refine the wind speed operational limits to wind speeds for which optimal solutions are found.
@@ -293,7 +298,7 @@ def generate_power_curves(loc='mmc', n_clusters=8):
               "[{:.3f}, {:.3f}].".format(vw_cut_in, vw_cut_out, pc.wind_speeds[0], pc.wind_speeds[-1]))
 
         # Plot power curve together with that of the other wind profile shapes.
-        p_cycle = [kpis['average_power']['cycle'] for kpis in pc.performance_indicators]
+        p_cycle = [kpis['average_power']['cycle'] for kpis in pc.performance_indicators] #TODO here we also take possible failed simulations/optimizations? 
         ax_pcs[0].plot(pc.wind_speeds, p_cycle, label=i_profile)
         ax_pcs[1].plot(pc.wind_speeds/vw_cut_out, p_cycle, label=i_profile)
 
@@ -303,13 +308,13 @@ def generate_power_curves(loc='mmc', n_clusters=8):
                                      [sys_props_v3.reeling_speed_min_limit, sys_props_v3.reeling_speed_max_limit])
 
         n_cwp = [kpis['n_crosswind_patterns'] for kpis in pc.performance_indicators]
-        export_to_csv(pc.wind_speeds, vw_cut_out, p_cycle, pc.x_opts, n_cwp, i_profile, suffix)
+        export_to_csv(pc.wind_speeds, vw_cut_out, p_cycle, pc.x_opts, n_cwp, i_profile)
     ax_pcs[1].legend()
 
     df = pd.DataFrame(limits_refined)
     print(df)
-    if not os.path.exists('output/wind_limits_refined{}.csv'.format(suffix)):
-        df.to_csv('output/wind_limits_refined{}.csv'.format(suffix))
+    if not os.path.exists(refined_cut_wind_speeds_file):
+        df.to_csv(refined_cut_wind_speeds_file)
     else:
         print("Skipping exporting operational limits.")
 
@@ -380,8 +385,46 @@ def compare_kpis(power_curves):
         plt.ylabel('Reel-out elevation angle [deg]')
 
 
-if __name__ == "__main__":
-    estimate_wind_speed_operational_limits(n_clusters=8, loc='mmc')
-    pcs = generate_power_curves(loc='mmc', n_clusters=8)
-    compare_kpis(pcs)
-    plt.show()
+def interpret_input_args():
+    estimate_cut_in_out, make_power_curves = (False, False)
+    if len(sys.argv) > 1:  # User input was given
+        help = """
+        python power_curves.py                  : run qsm to estimate the cut-in and cut-out wind speeds and power curves for the resulting range of absolute wind speeds
+        python power_curves.py -p               : run qsm to estimate the power curves
+        python power_curves.py -c               : run qsm to estimate the cut-in and cut-out wind speeds
+        python power_curves.py -h               : display this help
+        """
+        try:
+            opts, args = getopt.getopt(sys.argv[1:], "hpc", ["help", "power", "cut"])
+        except getopt.GetoptError:  # User input not given correctly, display help and end
+            print(help)
+            sys.exit()
+        for opt, arg in opts:
+            if opt in ("-h", "--help"):  # Help argument called, display help and end
+                print(help)
+                sys.exit()
+            elif opt in ("-p", "--power"): 
+                make_power_curves = True
+            elif opt in ("-c", "--cut"):  
+                estimate_cut_in_out = True
+    else:
+        estimate_cut_in_out, make_power_curves = (True, True)
+
+    return estimate_cut_in_out, make_power_curves
+
+
+if __name__ == '__main__':
+    # Read program parameters 
+    estimate_cut_in_out, make_power_curves = interpret_input_args()
+
+    import time
+    since = time.time()
+    if estimate_cut_in_out:
+        estimate_wind_speed_operational_limits(n_clusters=8, loc='mmc')
+    if make_power_curves:
+        pcs = generate_power_curves(loc='mmc', n_clusters=8)
+        compare_kpis(pcs)
+    
+    time_elapsed = time.time() - since
+    print('Time lapsed: ', '\t{:.0f}m {:.0f}s'.format(time_elapsed // 60, time_elapsed % 60))
+    #plt.show()
