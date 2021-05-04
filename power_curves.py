@@ -312,6 +312,7 @@ def generate_power_curves(loc='mmc', n_clusters=8):
         
         # mask failed simulation, export only good results
         mask = np.array([~kpi['sim_successful'] for kpi in kpis])
+        print('successful simulations: {}, all simulations: {}'.format(sum(mask), len(kpis)))
         export_to_csv(pc.wind_speeds[mask], vw_cut_out[mask], p_cycle[mask], pc.x_opts[mask], n_cwp[mask], i_profile)
     ax_pcs[1].legend()
 

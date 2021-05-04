@@ -72,7 +72,7 @@ class PowerCurveConstructor:
         x_opts = np.array(x_opts)
         (x_opt_mean, x_opt_std) = (np.mean(x_opts, axis=1), np.mean(x_opts, axis=1))
         print('  The resulting mean {} with a standard deviation of {}'.format(x_opt_mean, x_opt_std))
-        if x_opt_std > 0.01*x_opt_mean: #TODO: lower/higher, different check? - make this as debug output? 
+        if (x_opt_std > 0.1*x_opt_mean).any(): #TODO: lower/higher, different check? - make this as debug output? 
             print('  More than 1% standard deviation - unstable result')
             flag_unstable_opt_result = True
 
@@ -81,7 +81,7 @@ class PowerCurveConstructor:
         print('Optimizer eval function results: ', f_opt)
         (f_opt_mean, f_opt_std) = (np.mean(f_opt), np.std(f_opt))
         print('  The resulting mean {} with a standard deviation of {}'.format(f_opt_mean, f_opt_std))
-        if f_opt_std > 0.01*f_opt_mean:
+        if f_opt_std > 0.1*f_opt_mean:
             print('  More than 1% standard deviation - unstable result')
             flag_unstable_opt_result = True
 
