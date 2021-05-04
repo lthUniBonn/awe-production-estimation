@@ -287,6 +287,7 @@ def generate_power_curves(loc='mmc', n_clusters=8):
         # Start optimizations.
         pc = PowerCurveConstructor(wind_speeds)
         pc.run_predefined_sequence(op_seq, x0)
+        # export all results, including failed simulations, tagged in kip and other performance flags
         pc.export_results(power_curve_output_file_name.format(i_profile=i_profile, suffix='pickle'))
         res_pcs.append(pc)
 
@@ -298,7 +299,7 @@ def generate_power_curves(loc='mmc', n_clusters=8):
               "[{:.3f}, {:.3f}].".format(vw_cut_in, vw_cut_out, pc.wind_speeds[0], pc.wind_speeds[-1]))
 
         # Plot power curve together with that of the other wind profile shapes.
-        p_cycle = [kpis['average_power']['cycle'] for kpis in pc.performance_indicators] #TODO here we also take possible failed simulations/optimizations? 
+        p_cycle = [kpis['average_power']['cycle'] for kpis in pc.performance_indicators]
         ax_pcs[0].plot(pc.wind_speeds, p_cycle, label=i_profile)
         ax_pcs[1].plot(pc.wind_speeds/vw_cut_out, p_cycle, label=i_profile)
 
@@ -308,7 +309,10 @@ def generate_power_curves(loc='mmc', n_clusters=8):
                                      [sys_props_v3.reeling_speed_min_limit, sys_props_v3.reeling_speed_max_limit])
 
         n_cwp = [kpis['n_crosswind_patterns'] for kpis in pc.performance_indicators]
-        export_to_csv(pc.wind_speeds, vw_cut_out, p_cycle, pc.x_opts, n_cwp, i_profile)
+        
+        # mask failed simulation, export only good results
+        mask = np.array([~kpi['sim_successful'] for kpi in kpis])
+        export_to_csv(pc.wind_speeds[mask], vw_cut_out[mask], p_cycle[mask], pc.x_opts[mask], n_cwp[mask], i_profile)
     ax_pcs[1].legend()
 
     df = pd.DataFrame(limits_refined)

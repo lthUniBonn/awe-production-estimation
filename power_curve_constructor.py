@@ -19,19 +19,80 @@ class PowerCurveConstructor:
         self.optimization_details = []
         self.constraints = []
         self.performance_indicators = []
+        self.optimization_rounds = {'total':[], 'failed':[], 'unstable_results':[]}
 
     def run_optimization(self, wind_speed, power_optimizer, x0):
-        #TODO: evaluate if robustness can be improved by running multiple optimizations using different starting points
+        #TODO: evaluate if robustness can be improved by running multiple optimizations using different starting points: loop over inital vals, failed 10 times -> fail
         power_optimizer.environment_state.set_reference_wind_speed(wind_speed)
 
         print("x0:", x0)
-        power_optimizer.x0_real_scale = x0
-        try:
-            x_opt = power_optimizer.optimize()
-        except OptimizerError as e:
-            print("Optimization finished with an error: {}".format(e))
-            raise e
+        # Optimize around x0
+        stop_optimize_on_success = False
+        # perturb x0: 
+        x0_range = np.array([x0, x0*1.05, x0*0.95]) #TODO create smeared x0 - gaussian
+        n_x0 = x0_range.shape[0]
+        x_opts = []
+        op_ress = []
+        mask_opt_failed=np.zeros(len(x0_range))
+        for i in range(n_x0):
+            x0_test = x0_range[i]
+            power_optimizer.x0_real_scale = x0_test
+            try:
+                print("Testing the {}th starting values: {}".format(i, x0_test))
+                x_opts.append(power_optimizer.optimize())
+                op_ress.append(power_optimizer.op_res)
+                if stop_optimize_on_success:
+                    x0_range = x0_range[:i+1]
+                    mask_opt_failed = mask_opt_failed[i+1]
+                    break
+            except OptimizerError as e:
+                print("Optimization number {} finished with an error: {}".format(i+1, e))
+                err = e
+                mask_opt_failed[i] = 1
+                continue
+
+        # consistency check sim results
+        x0_success = x0_range[mask_opt_failed==0]
+        x0_failed = x0_range[mask_opt_failed==1]
+        print('Failed starting values: ', x0_failed)
+        print('Successful starting values: ', x0_success)
+        
+        # if Optimization failed for good: raise Optimization error
+        if len(x0_success) == 0:
+            raise err
             return {}, False
+
+        # Optimization successful at least once: append to results
+        self.optimization_rounds['total'].append(len(x0_range))
+        self.optimization_rounds['failed'].append(len(x0_failed))
+
+        # corresponding eval function values from the optimizer
+        flag_unstable_opt_result = False
+        print('Optimizer x point results: ', x_opts)
+        x_opts = np.array(x_opts)
+        (x_opt_mean, x_opt_std) = (np.mean(x_opts, axis=1), np.mean(x_opts, axis=1))
+        print('  The resulting mean {} with a standard deviation of {}'.format(x_opt_mean, x_opt_std))
+        if x_opt_std > 0.01*x_opt_mean: #TODO: lower/higher, different check? - make this as debug output? 
+            print('  More than 1% standard deviation - unstable result')
+            flag_unstable_opt_result = True
+
+        # corresponding eval function values from the optimizer
+        f_opt = [op_res['fun'] for op_res in op_ress]
+        print('Optimizer eval function results: ', f_opt)
+        (f_opt_mean, f_opt_std) = (np.mean(f_opt), np.std(f_opt))
+        print('  The resulting mean {} with a standard deviation of {}'.format(f_opt_mean, f_opt_std))
+        if f_opt_std > 0.01*f_opt_mean:
+            print('  More than 1% standard deviation - unstable result')
+            flag_unstable_opt_result = True
+
+        self.optimization_rounds['unstable_results'].append(flag_unstable_opt_result)
+
+        # Chose best optimization result:
+        min_idx = np.argmin(f_opt) 
+        x_opt = x_opts[min_idx]
+        x0 = x0_range[min_idx]
+
+        # consistency check function values 
         self.x0.append(x0)
         self.x_opts.append(x_opt)
         self.optimization_details.append(power_optimizer.op_res)
@@ -39,13 +100,14 @@ class PowerCurveConstructor:
         try:
             cons, kpis = power_optimizer.eval_point()
             sim_successful = True
-        except (SteadyStateError, OperationalLimitViolation, PhaseError) as e: #TODO why can these be caught again later? 
+        except (SteadyStateError, OperationalLimitViolation, PhaseError) as e:  
             print("Error occurred while evaluating the resulting optimal point: {}".format(e))
-            cons, kpis = power_optimizer.eval_point(relax_errors=True) # TODO why not return here? kpis will be appended then even though it is wrong? 
+            cons, kpis = power_optimizer.eval_point(relax_errors=True) # relaxed errors only relax OperationalLimitViolation
             sim_successful = False
 
         print("cons:", cons)
         self.constraints.append(cons)
+        # Failed simulation results are later masked
         kpis['sim_successful'] = sim_successful
         self.performance_indicators.append(kpis)
         return x_opt, sim_successful
