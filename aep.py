@@ -31,7 +31,7 @@ def plot_power_and_wind_speed_probability_curves(n_clusters=8, loc='mmc', post_p
         # Plot power curve.
         i_profile = i + 1
         df_power_curve = pd.read_csv(power_curve_output_file_name.format(suffix='csv', i_profile=i_profile), sep=";")
-        #TODO exclude sin_successful = False 
+        #mask discontinuities check
         if post_process_curves:
             mask_faulty_point = get_mask_discontinuities(df_power_curve)
         else:
