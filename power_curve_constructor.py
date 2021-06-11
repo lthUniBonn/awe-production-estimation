@@ -1,4 +1,3 @@
-import matplotlib.pyplot as plt
 import matplotlib as mpl
 import numpy as np
 import pickle
@@ -9,6 +8,11 @@ from cycle_optimizer import OptimizerError
 
 from utils import flatten_dict
 
+from config import plots_interactive, plot_output_file
+
+if not plots_interactive:
+    mpl.use('Pdf')
+import matplotlib.pyplot as plt
 
 class PowerCurveConstructor:
     def __init__(self, wind_speeds):
@@ -19,9 +23,10 @@ class PowerCurveConstructor:
         self.optimization_details = []
         self.constraints = []
         self.performance_indicators = []
-        self.optimization_rounds = {'total':[], 'failed':[], 'unstable_results':[]}
+        self.optimization_rounds = {'total_opts':[], 'successful_opts':[], 'opt_and_sim_successful':[], 'unstable_results':[], 'second_wind_speed_test':[],
+                                    'optimizer_error_starting_vals':[], 'optimizer_error_wind_speed':[]}
 
-    def run_optimization(self, wind_speed, power_optimizer, x0):
+    def run_optimization(self, wind_speed, power_optimizer, x0, second_attempt=False, save_initial_value_scan_output=True):#TODO set to false by default
         #TODO: evaluate if robustness can be improved by running multiple optimizations using different starting points: loop over inital vals, failed 10 times -> fail
         power_optimizer.environment_state.set_reference_wind_speed(wind_speed)
 
@@ -29,11 +34,16 @@ class PowerCurveConstructor:
         # Optimize around x0
         stop_optimize_on_success = False
         # perturb x0: 
-        x0_range = np.array([x0, x0*1.05, x0*0.95]) #TODO create smeared x0 - gaussian
-        n_x0 = x0_range.shape[0]
+        x0_range = np.array([x0, [5e2, 3.5e2, 0.5, 1.7e2, 2e2 ], x0*0.95]) #TODO create smeared x0 within bounds - gaussian
+        x0_range[2,4] = 2e2
+        n_x0 = x0_range.shape[0] # this might be the reason for the lower trajectories...? 
         x_opts = []
         op_ress = []
-        mask_opt_failed=np.zeros(len(x0_range))
+        conss = []
+        kpiss = []
+        sim_successfuls = []
+        opt_successfuls = []
+
         for i in range(n_x0):
             x0_test = x0_range[i]
             power_optimizer.x0_real_scale = x0_test
@@ -41,76 +51,130 @@ class PowerCurveConstructor:
                 print("Testing the {}th starting values: {}".format(i, x0_test))
                 x_opts.append(power_optimizer.optimize())
                 op_ress.append(power_optimizer.op_res)
+                opt_successfuls.append(True)
+                try:
+                    cons, kpis = power_optimizer.eval_point()
+                    conss.append(cons)
+                    kpiss.append(kpis)
+                    sim_successfuls.append(True)
+                    print('Simulation successful')
+                except (SteadyStateError, OperationalLimitViolation, PhaseError) as e:  
+                    print("Error occurred while evaluating the resulting optimal point: {}".format(e))
+                    cons, kpis = power_optimizer.eval_point(relax_errors=True) # relaxed errors only relax OperationalLimitViolation
+                    conss.append(cons)
+                    kpiss.append(kpis)
+                    sim_err = e
+                    sim_successfuls.append(False)
+                    print('Simulation failed -> errors relaxed')
+
                 if stop_optimize_on_success:
                     x0_range = x0_range[:i+1]
-                    mask_opt_failed = mask_opt_failed[i+1]
                     break
-            except OptimizerError as e:
-                print("Optimization number {} finished with an error: {}".format(i+1, e))
-                err = e
-                mask_opt_failed[i] = 1
+
+            except (OptimizerError) as e:
+                print("Optimization number {} finished with an error: {}".format(i, e))
+                opt_err = e
+                opt_successfuls.append(False)
                 continue
+            except (SteadyStateError, PhaseError, OperationalLimitViolation) as e:
+                print("Optimization number {} finished with a simulation error: {}".format(i, e))
+                opt_err = e
+                opt_successfuls.append(False)
+                continue
+            except (FloatingPointError) as e:
+                print("Optimization number {} finished due to a mathematical simulation error: {}".format(i, e))
+                opt_err = e
+                opt_successfuls.append(False)
+            
+            
 
-        # consistency check sim results
-        x0_success = x0_range[mask_opt_failed==0]
-        x0_failed = x0_range[mask_opt_failed==1]
-        print('Failed starting values: ', x0_failed)
-        print('Successful starting values: ', x0_success)
+    
+        # Optimization and Simulation successful at least once: append to results
+        self.optimization_rounds['total_opts'].append(len(opt_successfuls))
+        self.optimization_rounds['successful_opts'].append(sum(opt_successfuls))
+        self.optimization_rounds['opt_and_sim_successful'].append(sum(sim_successfuls)) # good results
+        self.optimization_rounds['second_wind_speed_test'].append(second_attempt)
         
-        # if Optimization failed for good: raise Optimization error
-        if len(x0_success) == 0:
-            raise err
-            return {}, False
+        if save_initial_value_scan_output:
+            print('Saving optimizer scan output')
+            #TODO scan optimizer output / sim results to file - dep on wind_speed
+            
+            #TODO independent of this: optvis history output?
 
-        # Optimization successful at least once: append to results
-        self.optimization_rounds['total'].append(len(x0_range))
-        self.optimization_rounds['failed'].append(len(x0_failed))
+        if sum(sim_successfuls) > 0:
+            # consistency check sim results - both optimization and simulation work
+            x0_success = x0_range[opt_successfuls][sim_successfuls]
+            x0_failed = list(x0_range[np.logical_not(opt_successfuls)]) + list(x0_range[opt_successfuls][np.logical_not(sim_successfuls)])
+            #print('Failed starting values: ', x0_failed)
+            #print('Successful starting values: ', x0_success)
+      
+            # consistency check function values 
+            # corresponding eval function values from the optimizer
+            flag_unstable_opt_result = False
+    
+            #print('Optimizer x point results: ', x_opts) 
+            #print(' Leading to a successful simulation:', sim_successfuls)
+            x_opts_succ = np.array(x_opts)[sim_successfuls]
+            (x_opt_mean, x_opt_std) = (np.mean(x_opts_succ, axis=0), np.std(x_opts_succ, axis=0))
+            #print('  The resulting mean {} with a standard deviation of {}'.format(x_opt_mean, x_opt_std))
+            if (x_opt_std > np.abs(0.1*x_opt_mean)).any(): #TODO: lower/higher, different check? - make this as debug output? 
+                #print('  More than 1% standard deviation - unstable result')
+                flag_unstable_opt_result = True
+    
+            # corresponding eval function values from the optimizer
+            op_ress_succ = [op_ress[i] for i in range(len(op_ress)) if sim_successfuls[i]]
+            f_opt = [op_res['fun'] for op_res in op_ress_succ]
+            #print('Successful optimizer eval function results: ', f_opt)
+            (f_opt_mean, f_opt_std) = (np.mean(f_opt), np.std(f_opt))
+            #print('  The resulting mean {} with a standard deviation of {}'.format(f_opt_mean, f_opt_std))
+            if f_opt_std > np.abs(0.1*f_opt_mean):
+                #print('  More than 1% standard deviation - unstable result')
+                flag_unstable_opt_result = True
+    
+            self.optimization_rounds['unstable_results'].append(flag_unstable_opt_result)
+    
+            # Chose best optimization result:
+            minimal_f_opt = np.argmin(f_opt) # maching index in sim_successfuls
+    
+            self.x0.append(x0_success[minimal_f_opt])
+            x_opt = x_opts_succ[minimal_f_opt]
+            self.x_opts.append(x_opt)
+            self.optimization_details.append(op_ress_succ[minimal_f_opt])
+    
+            print("cons:", conss[minimal_f_opt])
+            self.constraints.append(conss[minimal_f_opt])
+            # Failed simulation results are later masked
+            kpis = kpiss[minimal_f_opt]
+            kpis['sim_successful'] = True
+            self.performance_indicators.append(kpis)
+    
+            return x_opt, True # x_opt result, sim_successful
 
-        # corresponding eval function values from the optimizer
-        flag_unstable_opt_result = False
-        print('Optimizer x point results: ', x_opts)
-        x_opts = np.array(x_opts)
-        (x_opt_mean, x_opt_std) = (np.mean(x_opts, axis=1), np.mean(x_opts, axis=1))
-        print('  The resulting mean {} with a standard deviation of {}'.format(x_opt_mean, x_opt_std))
-        if (x_opt_std > 0.1*x_opt_mean).any(): #TODO: lower/higher, different check? - make this as debug output? 
-            print('  More than 1% standard deviation - unstable result')
-            flag_unstable_opt_result = True
+        elif sum(opt_successfuls) > 0:
+            # simulations failed (run again with loose errors) but optimization worked
+            print('All simulations failed, save flagged loose error simulation output')
+            self.x0.append(x0_range[opt_successfuls][-1])
+            self.x_opts.append(x_opts[-1])
+            self.optimization_details.append(op_ress[-1])
+    
+            print("cons:", conss[-1])
+            self.constraints.append(conss[-1])
+            # Failed simulation results are later masked
+            kpis = kpiss[-1]
+            kpis['sim_successful'] = False
+            self.performance_indicators.append(kpis)
 
-        # corresponding eval function values from the optimizer
-        f_opt = [op_res['fun'] for op_res in op_ress]
-        print('Optimizer eval function results: ', f_opt)
-        (f_opt_mean, f_opt_std) = (np.mean(f_opt), np.std(f_opt))
-        print('  The resulting mean {} with a standard deviation of {}'.format(f_opt_mean, f_opt_std))
-        if f_opt_std > 0.1*f_opt_mean:
-            print('  More than 1% standard deviation - unstable result')
-            flag_unstable_opt_result = True
+            print('Output appended, raise simulation error: ')
+            raise sim_err
+        else:
+            # optimizatons all failed
+            self.optimization_rounds['optimizer_error_starting_vals'].append(x0_range)
+            self.optimization_rounds['optimizer_error_wind_speed'].append(wind_speed)
+            print('All optimizations failed, raise optimizer Error: ')
+            raise opt_err
 
-        self.optimization_rounds['unstable_results'].append(flag_unstable_opt_result)
 
-        # Chose best optimization result:
-        min_idx = np.argmin(f_opt) 
-        x_opt = x_opts[min_idx]
-        x0 = x0_range[min_idx]
-
-        # consistency check function values 
-        self.x0.append(x0)
-        self.x_opts.append(x_opt)
-        self.optimization_details.append(power_optimizer.op_res)
-
-        try:
-            cons, kpis = power_optimizer.eval_point()
-            sim_successful = True
-        except (SteadyStateError, OperationalLimitViolation, PhaseError) as e:  
-            print("Error occurred while evaluating the resulting optimal point: {}".format(e))
-            cons, kpis = power_optimizer.eval_point(relax_errors=True) # relaxed errors only relax OperationalLimitViolation
-            sim_successful = False
-
-        print("cons:", cons)
-        self.constraints.append(cons)
-        # Failed simulation results are later masked
-        kpis['sim_successful'] = sim_successful
-        self.performance_indicators.append(kpis)
-        return x_opt, sim_successful
+            
 
     def run_predefined_sequence(self, seq, x0_start):
         wind_speed_tresholds = iter(sorted(list(seq)))
@@ -136,7 +200,7 @@ class PowerCurveConstructor:
                 try:  # Retry for a slightly different wind speed.
                     print('first optimization/simulation ended in error: {}'.format(e))
                     print('run with varied wind speed:', vw+1e-2)
-                    x_opt, sim_successful = self.run_optimization(vw+1e-2, power_optimizer, x0_next)
+                    x_opt, sim_successful = self.run_optimization(vw+1e-2, power_optimizer, x0_next, second_attempt=True)
                     self.wind_speeds[i] = vw+1e-2
                 except (OperationalLimitViolation, SteadyStateError, PhaseError, OptimizerError):
                     self.wind_speeds = self.wind_speeds[:i]
@@ -147,27 +211,54 @@ class PowerCurveConstructor:
             if sim_successful:
                 x_opt_last = x_opt
                 vw_last = vw
+            print(self.wind_speeds[:i+1], [kpi['sim_successful'] for kpi in self.performance_indicators])
+            print(len(self.wind_speeds[:i+1]), sum([kpi['sim_successful'] for kpi in self.performance_indicators]))
 
-    def plot_optimal_trajectories(self, wind_speed_ids=None, ax=None, circle_radius=200, elevation_line=25*np.pi/180):
+    def plot_optimal_trajectories(self, wind_speed_ids=None, ax=None, circle_radius=200, elevation_line=25*np.pi/180,
+                                  plot_info=''):
         if ax is None:
             plt.figure(figsize=(6, 3.5))
             plt.subplots_adjust(right=0.65)
             ax = plt.gca()
 
+        mask = [kpis['sim_successful'] for kpis in self.performance_indicators]
+        all_kpis = [kpi for i,kpi in enumerate(self.performance_indicators) if mask[i]]
+        #mask power discontinuities 
+        import numpy.ma as ma
+        p_cycle = np.array([kpis['average_power']['cycle'] for kpis in all_kpis])
+        mask_power = p_cycle > 0  #TODO  mask negative jumps in power - check reason for negative power/ strong jumps
+        p_cycle = p_cycle[mask_power]
+        all_kpis = [kpi for i, kpi in enumerate(all_kpis) if mask_power[i]] 
+        wind_speeds = self.wind_speeds[mask_power]
+        
+
+        #TODO resolve source of problems
+        while True:
+            mask_power_disc = [True] + list((np.diff(p_cycle) > -500))
+            if sum(mask_power_disc) == len(mask_power_disc):
+                # No more discontinuities
+                break
+            print('Masking {} power runs'.format(len(mask_power_disc) - sum(mask_power_disc)))
+            p_cycle = p_cycle[mask_power_disc]
+            all_kpis = [kpi for i, kpi in enumerate(all_kpis) if mask_power_disc[i]] 
+            wind_speeds = wind_speeds[mask_power_disc]
+
         if wind_speed_ids is None:
-            if len(self.wind_speeds) > 8:
-                wind_speed_ids = [int(a) for a in np.linspace(0, len(self.wind_speeds)-1, 6)]
+            if len(wind_speeds) > 8:
+                wind_speed_ids = [int(a) for a in np.linspace(0, len(wind_speeds)-1, 6)]
             else:
-                wind_speed_ids = range(len(self.wind_speeds))
+                wind_speed_ids = range(len(wind_speeds))
+
 
         for i in wind_speed_ids:
-            v = self.wind_speeds[i]
-            kpis = self.performance_indicators[i]
+            v = wind_speeds[i]
+            kpis = all_kpis[i]
             if kpis is None:
                 print("No trajectory available for {} m/s wind speed.".format(v))
                 continue
 
             x_kite, z_kite = zip(*[(kp.x, kp.z) for kp in kpis['kinematics']])
+            print('min x, z: ', min(x_kite), min(z_kite))
             # try:
             #     z_traj = [kp.z for kp in kite_positions['trajectory']]
             # except AttributeError:
@@ -192,20 +283,28 @@ class PowerCurveConstructor:
         ax.grid()
         ax.set_aspect('equal')
         ax.legend(bbox_to_anchor=(1.04, 1), loc="upper left")
+        if not plots_interactive: plt.savefig(plot_output_file.format(title='optimal_trajectories{}'.format(plot_info)))
+
 
     def plot_optimization_results(self, opt_variable_labels=None, opt_variable_bounds=None, tether_force_limits=None,
-                                  reeling_speed_limits=None):
+                                  reeling_speed_limits=None, plot_info=''):
         assert self.x_opts, "No optimization results available for plotting."
-        xf, x0 = self.x_opts, self.x0
-        cons = self.constraints
-        kpis, opt_details = self.performance_indicators, self.optimization_details
+
+        # mask unsuccessful simulations
+        mask = [kpis['sim_successful'] for kpis in self.performance_indicators]
+        kpis = [kpi for i,kpi in enumerate(self.performance_indicators) if mask[i]]
+        opt_details = [od for i, od in enumerate(self.optimization_details) if mask[i]]
+        xf = [xopt for i, xopt in enumerate(self.x_opts) if mask[i]]
+        x0 = [x for i, x in enumerate(self.x0) if mask[i]]
+        cons = [c for i,c in enumerate(self.constraints) if mask[i]]
+
         try: #TODO this seems to be ineffective code? 
             performance_indicators = next(list(flatten_dict(kpi)) for kpi in kpis if kpi is not None)
         except StopIteration:
             performance_indicators = []
 
         n_opt_vars = len(xf[0])
-        fig, ax = plt.subplots(max([n_opt_vars, 6]), 2, sharex=True)
+        fig, ax = plt.subplots(max([n_opt_vars, 6]), 2, sharex=True) #TODO fig size in pdf too small
 
         # In the left column plot each optimization variable against the wind speed.
         for i in range(n_opt_vars):
@@ -227,22 +326,25 @@ class PowerCurveConstructor:
         ax[0, 0].legend()
 
         # In the right column plot the number of iterations in the upper panel.
+
         nits = np.array([od['nit'] for od in opt_details])
         ax[0, 1].plot(self.wind_speeds, nits)
-        mask_opt_failed = np.array([~od['success'] for od in opt_details])
-        ax[0, 1].plot(self.wind_speeds[mask_opt_failed], nits[mask_opt_failed], 'x', label='opt failed')
-        mask_sim_failed = np.array([~kpi['sim_successful'] for kpi in kpis])
-        ax[0, 1].plot(self.wind_speeds[mask_sim_failed], nits[mask_sim_failed], 'x', label='sim failed')
+        #TODO this is now obsolete / to be done differently
+        #mask_opt_failed = np.array([~od['success'] for od in opt_details])
+        #ax[0, 1].plot(self.wind_speeds[mask_opt_failed], nits[mask_opt_failed], 'x', label='opt failed')
+        #mask_sim_failed = np.array([~kpi['sim_successful'] for kpi in kpis])
+        #ax[0, 1].plot(self.wind_speeds[mask_sim_failed], nits[mask_sim_failed], 'x', label='sim failed')
         ax[0, 1].grid()
-        ax[0, 1].legend()
+        #ax[0, 1].legend()
         ax[0, 1].set_ylabel('Optimization iterations [-]')
 
         # In the second panel, plot the optimal power.
-        cons_treshold = -.1
-        mask_cons_adhered = np.array([all([c >= cons_treshold for c in con]) for con in cons])
-        mask_plot_power = ~mask_sim_failed & mask_cons_adhered
+        #TODO this is now obsolete / to be done differently
+        #cons_treshold = -.1
+        #mask_cons_adhered = np.array([all([c >= cons_treshold for c in con]) for con in cons])
+        #mask_plot_power = ~mask_sim_failed & mask_cons_adhered
         power = np.array([kpi['average_power']['cycle'] for kpi in kpis])
-        power[~mask_plot_power] = np.nan
+        #power[~mask_plot_power] = np.nan
         ax[1, 1].plot(self.wind_speeds, power)
         ax[1, 1].grid()
         ax[1, 1].set_ylabel('Mean power [W]')
@@ -339,6 +441,8 @@ class PowerCurveConstructor:
         ax[-1, 0].set_xlabel('Wind speeds [m/s]')
         ax[-1, 1].set_xlabel('Wind speeds [m/s]')
         ax[0, 0].set_xlim([self.wind_speeds[0], self.wind_speeds[-1]])
+        if not plots_interactive: plt.savefig(plot_output_file.format(title='optimization_results{}'.format(plot_info)))
+
 
     def export_results(self, file_name):
         export_dict = self.__dict__
