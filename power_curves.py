@@ -1,8 +1,6 @@
 import os
 import numpy as np
-import matplotlib as mpl
-mpl.use('Pdf')
-import matplotlib.pyplot as plt
+
 import pandas as pd
 from copy import deepcopy
 
@@ -13,7 +11,13 @@ from kitepower_kites import sys_props_v3
 from cycle_optimizer import OptimizerCycle
 from power_curve_constructor import PowerCurveConstructor
 
-from config import file_name_profiles, cut_wind_speeds_file, refined_cut_wind_speeds_file, power_curve_output_file_name
+from config import file_name_profiles, cut_wind_speeds_file, refined_cut_wind_speeds_file, power_curve_output_file_name, \
+    plots_interactive, plot_output_file, n_clusters
+
+if not plots_interactive:
+    import matplotlib as mpl
+    mpl.use('Pdf')
+import matplotlib.pyplot as plt
 
 # Assumptions representative reel-out state at cut-in wind speed.
 theta_ro_ci = 25 * np.pi / 180.
@@ -162,7 +166,7 @@ def create_environment(df, i_profile):
     return env
 
 
-def estimate_wind_speed_operational_limits(loc='mmc', n_clusters=8):
+def estimate_wind_speed_operational_limits(loc='mmc', n_clusters=8, export_operational_limits=True):
     """Estimate the cut-in and cut-out wind speeds for each wind profile shape. These wind speeds are refined when
     determining the power curves."""
 
@@ -201,10 +205,8 @@ def estimate_wind_speed_operational_limits(loc='mmc', n_clusters=8):
     df = pd.DataFrame(res)
     print(df)
 
-    if not os.path.exists(cut_wind_speeds_file):
+    if export_operational_limits:
         df.to_csv(cut_wind_speeds_file)
-    else:
-        print("Skipping exporting operational limits.")
 
     ax[0].set_title("Cut-in")
     ax[0].set_xlim([0, None])
@@ -212,6 +214,7 @@ def estimate_wind_speed_operational_limits(loc='mmc', n_clusters=8):
     ax[1].set_title("Cut-out")
     ax[1].set_xlim([0, None])
     ax[1].set_ylim([0, 400])
+    if not plots_interactive: plt.savefig(plot_output_file.format(title='estimate_wind_speed_operational_limits'))
 
 
 def generate_power_curves(loc='mmc', n_clusters=8):
@@ -236,13 +239,15 @@ def generate_power_curves(loc='mmc', n_clusters=8):
     cycle_sim_settings_pc_phase2 = deepcopy(cycle_sim_settings_pc_phase1)
     cycle_sim_settings_pc_phase2['cycle']['traction_phase'] = TractionPhaseHybrid
 
-    ax_pcs = plt.subplots(2, 1)[1]
+    fig, ax_pcs = plt.subplots(2, 1)
     for a in ax_pcs: a.grid()
 
     limits_refined = {'vw_100m_cut_in': [], 'vw_100m_cut_out': []}
     res_pcs = []
     input_profiles = pd.read_csv(file_name_profiles, sep=";")
     for i_profile in range(1, n_clusters+1):
+        #if i_profile >1: continue #for testing only
+        print("Power curve generation for profile number {}".format(i_profile))
         # Pre-configure environment object for optimizations by setting normalized wind profile.
         env = create_environment(input_profiles, i_profile)
 
@@ -298,23 +303,46 @@ def generate_power_curves(loc='mmc', n_clusters=8):
         print("Cut-in and -out speeds changed from [{:.3f}, {:.3f}] to "
               "[{:.3f}, {:.3f}].".format(vw_cut_in, vw_cut_out, pc.wind_speeds[0], pc.wind_speeds[-1]))
 
-        # Plot power curve together with that of the other wind profile shapes.
-        p_cycle = [kpis['average_power']['cycle'] for kpis in pc.performance_indicators]
-        ax_pcs[0].plot(pc.wind_speeds, p_cycle, label=i_profile)
-        ax_pcs[1].plot(pc.wind_speeds/vw_cut_out, p_cycle, label=i_profile)
+        # mask failed simulation, export only good results
+        mask = [kpis['sim_successful'] for kpis in pc.performance_indicators]
 
-        pc.plot_optimal_trajectories()
+        # Plot power curve together with that of the other wind profile shapes.
+        p_cycle = np.array([kpis['average_power']['cycle'] for kpis in pc.performance_indicators])[mask]
+        print('p_cycle: ', p_cycle)
+        mask_power = p_cycle > 0  #TODO  mask negative jumps in power - check reason for negative power/ strong jumps
+        p_cycle_masked = p_cycle[mask_power]
+        wind = pc.wind_speeds[mask_power]
+        #TODO resolve source of problems
+        while True:
+            mask_power_disc = [True] + list(np.diff(p_cycle_masked) > -500)
+            p_cycle_masked = p_cycle_masked[mask_power_disc]
+            wind = wind[mask_power_disc]
+            if sum(mask_power_disc) == len(mask_power_disc):
+                # No more discontinuities
+                break
+                                        
+        
+        ax_pcs[0].plot(wind, p_cycle_masked/1000, label=i_profile)
+        ax_pcs[1].plot(wind/vw_cut_out, p_cycle_masked/1000, label=i_profile)
+
+        pc.plot_optimal_trajectories(plot_info='_profile_{}'.format(i_profile))
         pc.plot_optimization_results(op_cycle_pc_phase2.OPT_VARIABLE_LABELS, op_cycle_pc_phase2.bounds_real_scale,
                                      [sys_props_v3.tether_force_min_limit, sys_props_v3.tether_force_max_limit],
-                                     [sys_props_v3.reeling_speed_min_limit, sys_props_v3.reeling_speed_max_limit])
+                                     [sys_props_v3.reeling_speed_min_limit, sys_props_v3.reeling_speed_max_limit],
+                                     plot_info='_profile_{}'.format(i_profile))
 
-        n_cwp = [kpis['n_crosswind_patterns'] for kpis in pc.performance_indicators]
+        n_cwp = np.array([kpis['n_crosswind_patterns'] for kpis in pc.performance_indicators])[mask]
+        x_opts = np.array(pc.x_opts)[mask]
         
-        # mask failed simulation, export only good results
-        mask = np.array([~kpi['sim_successful'] for kpi in kpis])
-        print('successful simulations: {}, all simulations: {}'.format(sum(mask), len(kpis)))
-        export_to_csv(pc.wind_speeds[mask], vw_cut_out[mask], p_cycle[mask], pc.x_opts[mask], n_cwp[mask], i_profile)
+        export_to_csv(pc.wind_speeds, vw_cut_out, p_cycle, x_opts, n_cwp, i_profile)
     ax_pcs[1].legend()
+    ax_pcs[0].set_xlabel('$v_{w,100m}$ [m/s]')
+    ax_pcs[1].set_xlabel('$v_{w,100m}/v_{cut-out}$ [-]')
+    ax_pcs[0].set_ylabel('Mean cycle Power P [kW]')
+    ax_pcs[1].set_ylabel('Mean cycle Power P [kW]')
+    
+    
+    if not plots_interactive: fig.savefig(plot_output_file.format(title='generated_power_vs_wind_speeds'))
 
     df = pd.DataFrame(limits_refined)
     print(df)
@@ -329,22 +357,25 @@ def generate_power_curves(loc='mmc', n_clusters=8):
 def load_power_curve_results_and_plot_trajectories(loc='mmc', n_clusters=8, i_profile=1):
     """Plot trajectories from previously generated power curve."""
     pc = PowerCurveConstructor(None)
-    suffix = '_{}{}{}'.format(n_clusters, loc, i_profile)
-    pc.import_results('output/power_curve{}.pickle'.format(suffix))
-    pc.plot_optimal_trajectories(wind_speed_ids=[0, 9, 18, 33, 48, 64])
+    pc.import_results(power_curve_output_file_name.format(i_profile, 'pickle'))
+    pc.plot_optimal_trajectories(wind_speed_ids=[0, 9, 18, 33, 48, 64], plot_info='_profile_{}'.format(i_profile))
     plt.gcf().set_size_inches(5.5, 3.5)
     plt.subplots_adjust(top=0.99, bottom=0.1, left=0.12, right=0.65)
-    pc.plot_optimization_results()
+    pc.plot_optimization_results(plot_info='_profile_{}'.format(i_profile))
 
 
 def compare_kpis(power_curves):
     """Plot how performance indicators change with wind speed for all generated power curves."""
     fig_nums = [plt.figure().number for _ in range(5)]
-    for pc in power_curves:
+    for idx, pc in enumerate(power_curves):
+        mask = [kpis['sim_successful'] for kpis in pc.performance_indicators]
+        performance_indicators_success = [kpis for i, kpis in enumerate(pc.performance_indicators) if mask[i]]
+        x_opts_success = [x_opt for i, x_opt in enumerate(pc.x_opts) if mask[i]]
+
         plt.figure(fig_nums[0])
-        f_out_min = [kpis['min_tether_force']['out'] for kpis in pc.performance_indicators]
-        f_out_max = [kpis['max_tether_force']['out'] for kpis in pc.performance_indicators]
-        f_out = [x[0] for x in pc.x_opts]
+        f_out_min = [kpis['min_tether_force']['out'] for kpis in performance_indicators_success]
+        f_out_max = [kpis['max_tether_force']['out'] for kpis in performance_indicators_success]
+        f_out = [x[0] for x in x_opts_success]
         p = plt.plot(pc.wind_speeds, f_out)
         clr = p[-1].get_color()
         plt.plot(pc.wind_speeds, f_out_min, linestyle='None', marker=6, color=clr, markersize=7, markerfacecolor="None")
@@ -352,11 +383,12 @@ def compare_kpis(power_curves):
         plt.grid(True)
         plt.xlabel('$v_{w,100m}$ [m/s]')
         plt.ylabel('Reel-out force [N]')
+        if not plots_interactive: plt.savefig(plot_output_file.format(title='performance_indicator_reel_out_force_vs_wind_speeds_profile_{}'.format(idx+1)))
 
         plt.figure(fig_nums[1])
-        f_in_min = [kpis['min_tether_force']['in'] for kpis in pc.performance_indicators]
-        f_in_max = [kpis['max_tether_force']['in'] for kpis in pc.performance_indicators]
-        f_in = [x[1] for x in pc.x_opts]
+        f_in_min = [kpis['min_tether_force']['in'] for kpis in performance_indicators_success]
+        f_in_max = [kpis['max_tether_force']['in'] for kpis in performance_indicators_success]
+        f_in = [x[1] for x in x_opts_success]
         p = plt.plot(pc.wind_speeds, f_in)
         clr = p[-1].get_color()
         plt.plot(pc.wind_speeds, f_in_min, linestyle='None', marker=6, color=clr, markersize=7, markerfacecolor="None")
@@ -364,30 +396,37 @@ def compare_kpis(power_curves):
         plt.grid(True)
         plt.xlabel('$v_{w,100m}$ [m/s]')
         plt.ylabel('Reel-in force [N]')
+        if not plots_interactive: plt.savefig(plot_output_file.format(title='performance_indicator_reel_in_force_vs_wind_speeds_profile_{}'.format(idx+1)))
+
 
         plt.figure(fig_nums[2])
-        f_in_min = [kpis['min_reeling_speed']['out'] for kpis in pc.performance_indicators]
-        f_in_max = [kpis['max_reeling_speed']['out'] for kpis in pc.performance_indicators]
+        f_in_min = [kpis['min_reeling_speed']['out'] for kpis in performance_indicators_success]
+        f_in_max = [kpis['max_reeling_speed']['out'] for kpis in performance_indicators_success]
         p = plt.plot(pc.wind_speeds, f_in_min)
         clr = p[-1].get_color()
         plt.plot(pc.wind_speeds, f_in_max, linestyle='None', marker=7, color=clr, markerfacecolor="None")
         plt.grid(True)
         plt.xlabel('$v_{w,100m}$ [m/s]')
         plt.ylabel('Reel-out speed [m/s]')
+        if not plots_interactive: plt.savefig(plot_output_file.format(title='performance_indicator_reel_out_speed_vs_wind_speeds_profile_{}'.format(idx+1)))
 
         plt.figure(fig_nums[3])
-        n_cwp = [kpis['n_crosswind_patterns'] for kpis in pc.performance_indicators]
+        n_cwp = [kpis['n_crosswind_patterns'] for kpis in performance_indicators_success]
         plt.plot(pc.wind_speeds, n_cwp)
         plt.grid(True)
         plt.xlabel('$v_{w,100m}$ [m/s]')
         plt.ylabel('Number of cross-wind patterns [-]')
+        if not plots_interactive: plt.savefig(plot_output_file.format(title='performance_indicator_cw_patterns_vs_wind_speeds_profile_{}'.format(idx+1)))
+
 
         plt.figure(fig_nums[4])
-        elev_angles = [x_opt[2]*180./np.pi for x_opt in pc.x_opts]
+        elev_angles = [x_opt[2]*180./np.pi for x_opt in x_opts_success]
         plt.plot(pc.wind_speeds, elev_angles)
         plt.grid(True)
         plt.xlabel('$v_{w,100m}$ [m/s]')
         plt.ylabel('Reel-out elevation angle [deg]')
+        if not plots_interactive: plt.savefig(plot_output_file.format(title='performance_indicator_reel_out_elev_angle_vs_wind_speeds_profile_{}'.format(idx+1)))
+
 
 
 def interpret_input_args():
@@ -425,11 +464,11 @@ if __name__ == '__main__':
     import time
     since = time.time()
     if estimate_cut_in_out:
-        estimate_wind_speed_operational_limits(n_clusters=8, loc='mmc')
+        estimate_wind_speed_operational_limits(n_clusters=n_clusters, loc='mmc')
     if make_power_curves:
-        pcs = generate_power_curves(loc='mmc', n_clusters=8)
+        pcs = generate_power_curves(loc='mmc', n_clusters=n_clusters)
         compare_kpis(pcs)
     
     time_elapsed = time.time() - since
     print('Time lapsed: ', '\t{:.0f}m {:.0f}s'.format(time_elapsed // 60, time_elapsed % 60))
-    #plt.show()
+    if plots_interactive: plt.show()
