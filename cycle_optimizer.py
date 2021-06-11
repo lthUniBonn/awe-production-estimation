@@ -1,10 +1,15 @@
 from pyoptsparse import Optimization, SLSQP, Gradient
+from pyoptsparse import History
 from scipy import optimize as op
 import numpy as np
+import matplotlib as mpl
+mpl.use('Pdf')
 import matplotlib.pyplot as plt
 
 from qsm import Cycle
 from utils import flatten_dict
+
+from config import optimizer_history_file_name
 
 class OptimizerError(Exception):
     """Exception raised for optimizations not finishing successfully with 0."""
@@ -161,11 +166,12 @@ class Optimizer:
             print('upper:', (x_full - self.bounds_real_scale[:, 1]*self.scaling_x <= 1e6))
 
         obj, ineq_cons = self.eval_fun(x_full, *args)
+        #print(x_full, ineq_cons)
         funcs = {}
         funcs['obj'] = obj
         for idx, i_c in enumerate(self.reduce_ineq_cons):
             funcs['g{}'.format(i_c)] = ineq_cons[idx]
-
+        self.op_eval_func_calls += 1
         return funcs, 0
 
     def obj_fun(self, x, *args):
@@ -208,7 +214,7 @@ class Optimizer:
             raise OptimizerError("Optimization vector contains nan's.")
         self.x_progress.append(x.copy())
 
-    def optimize(self, *args, maxiter=30, iprint=0): # -1):
+    def optimize(self, *args, maxiter=30, iprint=-1): # 0):
         """Perform optimization."""
         self.clear_result_attributes()
         # Construct scaled starting point and bounds
@@ -259,7 +265,7 @@ class Optimizer:
                 op_problem.addCon('g{}'.format(i_c), lower=0)
                 # force_out_setpoint_min, force_in_setpoint_max, ineq_cons_traction_max_force, ineq_cons_cw_patterns
             if self.use_parallel_processing:
-                sens_mode = 'pgc'
+                sens_mode = 'pgc' #TODO pyOptSparse implementation? 
             else:
                 sens_mode = ''
             # TODO update for pyoptsparse
@@ -275,12 +281,11 @@ class Optimizer:
             optimizer.setOption('MAXIT', maxiter)
             optimizer.setOption('ACC', ftol)
 
-            op_sol = optimizer(op_problem, sens='FD', sensMode=sens_mode, sensStep=eps, *args)
+            self.op_eval_func_calls = 0
+            op_sol = optimizer(op_problem, sens='FD', sensMode=sens_mode, sensStep=eps, *args)  # , storeHistory=optimizer_history_file_name)
             print(op_sol)
-            if iprint == 1:
-                nit, nfev, njev = read_slsqp_output_file(print_details)
-            else:
-                nit, nfev, njev = 0, 0, 0
+            nit, nfev, njev = op_sol.userObjCalls , self.op_eval_func_calls, op_sol.userSensCalls    #TODO old: read_slsqp_output_file(print_details) from iprint = 1
+
 
             self.op_res = convert_optimization_result(op_sol, nit, nfev, njev, print_details, iprint)
         else:
@@ -681,6 +686,10 @@ def test():
     oc.eval_point(True)
     time_elapsed = time.time() - since
     print('Time lapsed: ', '\t{:.0f}m {:.0f}s'.format(time_elapsed // 60, time_elapsed % 60))
+
+    #optHist = History(optimizer_history_file_name)
+    #print(optHist.getValues(major=True, scale=False, stack=False, allowSens=True)['isMajor'])
+
     plt.show()
 
 
