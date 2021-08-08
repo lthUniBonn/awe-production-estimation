@@ -4,13 +4,12 @@ import pickle
 
 import matplotlib as mpl
 import matplotlib.pyplot as plt
-import matplotlib.colors as colors
 from matplotlib.cbook import MatplotlibDeprecationWarning
 from mpl_toolkits.basemap import Basemap
 
-from config import file_name_freq_distr, power_curve_output_file_name, plots_interactive, result_dir, \
-    n_clusters, data_info
-from config_clustering import  locations
+from config_production import file_name_freq_distr, power_curve_output_file_name, plots_interactive, result_dir, \
+    n_clusters, data_info, locations
+
 
 import warnings
 warnings.filterwarnings("ignore", category=MatplotlibDeprecationWarning)

@@ -9,7 +9,7 @@ import matplotlib.pyplot as plt
 from qsm import Cycle
 from utils import flatten_dict
 
-from config import optimizer_history_file_name
+from config_production import optimizer_history_file_name
 
 class OptimizerError(Exception):
     """Exception raised for optimizations not finishing successfully with 0."""
@@ -231,6 +231,7 @@ class Optimizer:
 
         print_details = True
         ftol, eps = 1e-6, 1e-6
+        self.precision = ftol
         if self.use_library == 'scipy':
             con = {
                 'type': 'ineq',  # g_i(x) >= 0
