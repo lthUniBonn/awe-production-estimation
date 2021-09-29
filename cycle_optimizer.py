@@ -160,7 +160,7 @@ class Optimizer:
         bounds_adhered = (x_full - self.bounds_real_scale[:, 0]*self.scaling_x >= -1e6).all() and \
                          (x_full - self.bounds_real_scale[:, 1]*self.scaling_x <= 1e6).all()
         if not bounds_adhered:
-            #raise OptimizerError("Optimization bounds violated.") #TODO keep this y/n? 
+            #raise OptimizerError("Optimization bounds violated.") #TODO keep this y/n?
             print('Optimization bounds VIOLATED. Diff to bounds:')
             print('lower:', (x_full - self.bounds_real_scale[:, 0]*self.scaling_x >= -1e6))
             print('upper:', (x_full - self.bounds_real_scale[:, 1]*self.scaling_x <= 1e6))
@@ -266,7 +266,7 @@ class Optimizer:
                 op_problem.addCon('g{}'.format(i_c), lower=0)
                 # force_out_setpoint_min, force_in_setpoint_max, ineq_cons_traction_max_force, ineq_cons_cw_patterns
             if self.use_parallel_processing:
-                sens_mode = 'pgc' #TODO pyOptSparse implementation? 
+                sens_mode = 'pgc' #TODO pyOptSparse implementation?
             else:
                 sens_mode = ''
             # TODO update for pyoptsparse
@@ -283,8 +283,8 @@ class Optimizer:
             optimizer.setOption('ACC', ftol)
 
             self.op_eval_func_calls = 0
-            op_sol = optimizer(op_problem, sens='FD', sensMode=sens_mode, sensStep=eps, *args)  # , storeHistory=optimizer_history_file_name)
-            print(op_sol)
+            op_sol = optimizer(op_problem, sens='FD', sensMode=sens_mode, sensStep=eps, *args)  # TODO , storeHistory=optimizer_history_file_name)
+            # print(op_sol)  # TODO make optional
             nit, nfev, njev = op_sol.userObjCalls , self.op_eval_func_calls, op_sol.userSensCalls    #TODO old: read_slsqp_output_file(print_details) from iprint = 1
 
 

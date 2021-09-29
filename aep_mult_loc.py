@@ -87,6 +87,7 @@ def evaluate_aep(n_clusters=8):
                 if sum(mask_power_disc) == len(mask_power_disc):
                     # No more discontinuities
                     break
+                print('Masking discontinuities..')
                 #print('Run power masking again') # masking happens fairly often for now
     
             # assert v[0] == wind_speed_bin_limits[i, 0] #TODO differences at 10th decimal threw assertion error
