@@ -8,11 +8,13 @@ from cycle_optimizer import OptimizerError
 
 from utils import flatten_dict
 
-from config import plots_interactive, plot_output_file
+from config_production import plots_interactive, plot_output_file
 
 if not plots_interactive:
     mpl.use('Pdf')
 import matplotlib.pyplot as plt
+
+from scipy.stats import truncnorm
 
 class PowerCurveConstructor:
     def __init__(self, wind_speeds):
@@ -26,17 +28,40 @@ class PowerCurveConstructor:
         self.optimization_rounds = {'total_opts':[], 'successful_opts':[], 'opt_and_sim_successful':[], 'unstable_results':[], 'second_wind_speed_test':[],
                                     'optimizer_error_starting_vals':[], 'optimizer_error_wind_speed':[]}
 
-    def run_optimization(self, wind_speed, power_optimizer, x0, second_attempt=False, save_initial_value_scan_output=True):#TODO set to false by default
+    def run_optimization(self, wind_speed, power_optimizer, x0, second_attempt=False, save_initial_value_scan_output=True, n_x_test=2, test_until_n_succ=3):#TODO set to false by default
         #TODO: evaluate if robustness can be improved by running multiple optimizations using different starting points: loop over inital vals, failed 10 times -> fail
         power_optimizer.environment_state.set_reference_wind_speed(wind_speed)
 
         print("x0:", x0)
         # Optimize around x0
-        stop_optimize_on_success = False
         # perturb x0: 
-        x0_range = np.array([x0, [5e2, 3.5e2, 0.5, 1.7e2, 2e2 ], x0*0.95]) #TODO create smeared x0 within bounds - gaussian
-        x0_range[2,4] = 2e2
-        n_x0 = x0_range.shape[0] # this might be the reason for the lower trajectories...? 
+        x0_range = [x0]
+        bounds = power_optimizer.bounds_real_scale  # Optimization variables bounds defining the search space.
+        reduce_x = power_optimizer.reduce_x
+        for n_test in range(n_x_test):
+            #gaussian random selection of x0 within bounds
+            x0_range.append( [truncnorm(a=bounds[i][0]/bounds[i][1], b=1, scale=bounds[i][1]).rvs() if i in reduce_x else x0[i] for i in range(len(x0))] )
+
+            #gaussian random smearing of x0 within bounds
+            smearing=0.1 #10% smearing of the respective values
+            def get_smeared_x0():
+                return [np.random.normal(x0[i], x0[i]*smearing) if i in reduce_x else x0[i] for i in range(len(x0))]
+            def test_smeared_x0(test_x0, precision=0):
+                return np.all([np.logical_and(test_x0[i] >= (bounds[i][0]-precision),test_x0[i] <= (bounds[i][1]+precision)) for i in range(len(test_x0))])
+            def smearing_x0():
+                test_smearing = get_smeared_x0()
+                bounds_adhered = test_smeared_x0(test_smearing)
+                while not bounds_adhered:
+                    test_smearing = get_smeared_x0()
+                    bounds_adhered = test_smeared_x0(test_smearing)
+                return test_smearing
+            # Test on two smeared variations of x0 
+            x0_range.append( smearing_x0() )
+            x0_range.append( smearing_x0() )            
+            
+        x0_range = np.array(x0_range)
+        print('Testing x0 range: ', x0_range)
+        n_x0 = x0_range.shape[0] 
         x_opts = []
         op_ress = []
         conss = []
@@ -50,26 +75,31 @@ class PowerCurveConstructor:
             try:
                 print("Testing the {}th starting values: {}".format(i, x0_test))
                 x_opts.append(power_optimizer.optimize())
-                op_ress.append(power_optimizer.op_res)
-                opt_successfuls.append(True)
-                try:
-                    cons, kpis = power_optimizer.eval_point()
-                    conss.append(cons)
-                    kpiss.append(kpis)
-                    sim_successfuls.append(True)
-                    print('Simulation successful')
-                except (SteadyStateError, OperationalLimitViolation, PhaseError) as e:  
-                    print("Error occurred while evaluating the resulting optimal point: {}".format(e))
-                    cons, kpis = power_optimizer.eval_point(relax_errors=True) # relaxed errors only relax OperationalLimitViolation
-                    conss.append(cons)
-                    kpiss.append(kpis)
-                    sim_err = e
-                    sim_successfuls.append(False)
-                    print('Simulation failed -> errors relaxed')
-
-                if stop_optimize_on_success:
-                    x0_range = x0_range[:i+1]
-                    break
+                if test_smeared_x0(power_optimizer.x_opt_real_scale, precision=power_optimizer.precision): # Safety check if variable bounds are adhered
+                    op_ress.append(power_optimizer.op_res)
+                    opt_successfuls.append(True)
+                    try:
+                        cons, kpis = power_optimizer.eval_point()
+                        conss.append(cons)
+                        kpiss.append(kpis)
+                        sim_successfuls.append(True) #test for negative power -> set failed simulation
+                        print('Simulation successful')
+                        if sum(sim_successfuls) == test_until_n_succ:
+                            x0_range = x0_range[:i+1]
+                            break
+                    except (SteadyStateError, OperationalLimitViolation, PhaseError) as e:  
+                        print("Error occurred while evaluating the resulting optimal point: {}".format(e))
+                        cons, kpis = power_optimizer.eval_point(relax_errors=True) # relaxed errors only relax OperationalLimitViolation
+                        conss.append(cons)
+                        kpiss.append(kpis) 
+                        sim_err = e
+                        sim_successfuls.append(False)
+                        print('Simulation failed -> errors relaxed')
+                else:
+                    print("Optimization number {} finished with an error: {}".format(i, 'Optimization bounds violated'))
+                    opt_err = OptimizerError("Optimization bounds violated.")
+                    x_opts = x_opts[:-1] #drop last x_opts, bonds are not adhered
+                    opt_successfuls.append(False)   
 
             except (OptimizerError) as e:
                 print("Optimization number {} finished with an error: {}".format(i, e))
@@ -87,7 +117,8 @@ class PowerCurveConstructor:
                 opt_successfuls.append(False)
             
             
-
+            #Include test for correct power, non_failed output -> else rerun opt
+        # output handling different? own function? 
     
         # Optimization and Simulation successful at least once: append to results
         self.optimization_rounds['total_opts'].append(len(opt_successfuls))
@@ -104,7 +135,7 @@ class PowerCurveConstructor:
         if sum(sim_successfuls) > 0:
             # consistency check sim results - both optimization and simulation work
             x0_success = x0_range[opt_successfuls][sim_successfuls]
-            x0_failed = list(x0_range[np.logical_not(opt_successfuls)]) + list(x0_range[opt_successfuls][np.logical_not(sim_successfuls)])
+            #x0_failed = list(x0_range[np.logical_not(opt_successfuls)]) + list(x0_range[opt_successfuls][np.logical_not(sim_successfuls)])
             #print('Failed starting values: ', x0_failed)
             #print('Successful starting values: ', x0_success)
       
@@ -140,11 +171,12 @@ class PowerCurveConstructor:
             x_opt = x_opts_succ[minimal_f_opt]
             self.x_opts.append(x_opt)
             self.optimization_details.append(op_ress_succ[minimal_f_opt])
-    
-            print("cons:", conss[minimal_f_opt])
-            self.constraints.append(conss[minimal_f_opt])
+   
+            cons = [conss[i] for i in range(len(kpiss)) if sim_successfuls[i]][minimal_f_opt] 
+            kpis = [kpiss[i] for i in range(len(kpiss)) if sim_successfuls[i]][minimal_f_opt]
+            print("cons:", cons)
+            self.constraints.append(cons)
             # Failed simulation results are later masked
-            kpis = kpiss[minimal_f_opt]
             kpis['sim_successful'] = True
             self.performance_indicators.append(kpis)
     
@@ -224,17 +256,16 @@ class PowerCurveConstructor:
         mask = [kpis['sim_successful'] for kpis in self.performance_indicators]
         all_kpis = [kpi for i,kpi in enumerate(self.performance_indicators) if mask[i]]
         #mask power discontinuities 
-        import numpy.ma as ma
         p_cycle = np.array([kpis['average_power']['cycle'] for kpis in all_kpis])
         mask_power = p_cycle > 0  #TODO  mask negative jumps in power - check reason for negative power/ strong jumps
         p_cycle = p_cycle[mask_power]
         all_kpis = [kpi for i, kpi in enumerate(all_kpis) if mask_power[i]] 
         wind_speeds = self.wind_speeds[mask_power]
         
-
+        masking_counter = 0
         #TODO resolve source of problems
         while True:
-            mask_power_disc = [True] + list((np.diff(p_cycle) > -500))
+            mask_power_disc = [True] + list((np.diff(p_cycle) > -1000))
             if sum(mask_power_disc) == len(mask_power_disc):
                 # No more discontinuities
                 break
@@ -242,6 +273,8 @@ class PowerCurveConstructor:
             p_cycle = p_cycle[mask_power_disc]
             all_kpis = [kpi for i, kpi in enumerate(all_kpis) if mask_power_disc[i]] 
             wind_speeds = wind_speeds[mask_power_disc]
+            masking_counter += 1
+        print('Total Masking {} power runs'.format(masking_counter))
 
         if wind_speed_ids is None:
             if len(wind_speeds) > 8:

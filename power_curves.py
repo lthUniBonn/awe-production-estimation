@@ -6,12 +6,12 @@ from copy import deepcopy
 
 import sys, getopt
 from qsm import LogProfile, NormalisedWindTable1D, KiteKinematics, SteadyState, TractionPhaseHybrid, \
-    TractionConstantElevation, SteadyStateError, TractionPhase
+    TractionConstantElevation, SteadyStateError, OperationalLimitViolation, TractionPhase
 from kitepower_kites import sys_props_v3
 from cycle_optimizer import OptimizerCycle
 from power_curve_constructor import PowerCurveConstructor
 
-from config import file_name_profiles, cut_wind_speeds_file, refined_cut_wind_speeds_file, power_curve_output_file_name, \
+from config_production import file_name_profiles, cut_wind_speeds_file, refined_cut_wind_speeds_file, power_curve_output_file_name, \
     plots_interactive, plot_output_file, n_clusters
 
 if not plots_interactive:
@@ -47,6 +47,7 @@ def get_cut_in_wind_speed(env):
     v0 = 5.6  # Lowest wind speed [m/s] with which the iteration is started.
 
     v = v0
+    rescan_finer_steps = False
     while True:
         env.set_reference_wind_speed(v)
         try:
@@ -64,11 +65,15 @@ def get_cut_in_wind_speed(env):
                     tether_force_end > sys_props_v3.tether_force_min_limit:
                 if v == v0:
                     raise ValueError("Starting speed is too high.")
-                return v, start_critical, critical_force
+                if rescan_finer_steps:
+                    return v, start_critical, critical_force
+                v = v - dv # Reset to last working wind speed
+                dv = dv/10 # Scan with finer binning
+                rescan_finer_steps = True
         except SteadyStateError:
             pass
 
-        v += dv
+        v += dv 
 
 
 def calc_n_cw_patterns(env, theta=60. * np.pi / 180.):
@@ -95,9 +100,8 @@ def calc_n_cw_patterns(env, theta=60. * np.pi / 180.):
 def get_max_wind_speed_at_elevation(env=LogProfile(), theta=60. * np.pi / 180.):
     """Iteratively determine maximum wind speed allowing at least one cross-wind manoeuvre during the reel-out phase for
     provided elevation angle."""
-    dv = 1e-1  # Step size [m/s].
-    v0 = 18.  # Lowest wind speed [m/s] with which the iteration is started.
-
+    dv = 0.2  # Step size [m/s].
+    v0 = 15.  # Lowest wind speed [m/s] with which the iteration is started.
     # Check if the starting wind speed gives a feasible solution.
     env.set_reference_wind_speed(v0)
     try:
@@ -108,18 +112,41 @@ def get_max_wind_speed_at_elevation(env=LogProfile(), theta=60. * np.pi / 180.):
 
     # Increase wind speed until number of cross-wind manoeuvres subceeds one.
     v = v0 + dv
+
+    rescan_finer_steps = False
+    fail_counter = 0
     while True:
         env.set_reference_wind_speed(v)
+        print('velocity: ', v, 'rescan: ', rescan_finer_steps, 'fail_couter: ', fail_counter)
         try:
             n_cw_patterns = calc_n_cw_patterns(env, theta)
-            if n_cw_patterns < 1.:
+            fail_counter = 0 # Simulation worked -> reset fail counter
+            print('n-cw-patterns', n_cw_patterns)
+            if n_cw_patterns < 1.: # No full crosswind pattern flown - cut out here
+                if rescan_finer_steps:
+                    return v
+                v = v - dv # Reset to last working wind speed
+                dv = dv/10 # Scan with finer binning
+                rescan_finer_steps = True
+        except OperationalLimitViolation: # Wind speed violates operational limits, cut out
+            if rescan_finer_steps: 
                 return v
+            v = v - dv # Reset to last working wind speed
+            dv = dv/10 # Scan with finer binning
+            
+            rescan_finer_steps = True
+            
         except SteadyStateError as e:
             if e.code != 8:  # Speed is too low to yield a solution when e.code == 8.
-                raise
-                # return None
+                if fail_counter < 9:
+                    v = v - dv - dv/10 # vary wind speed slightly, approaching last working wind speed
+                else: 
+                    # Up to previously working velocity no solution found 
+                    v = v - dv/10 # -> set last working wind speed as cut out
+                    return v
+                fail_counter += 1
 
-        if v > 30.:
+        if v > 40.:
             raise ValueError("Iteration did not find feasible cut-out speed.")
         v += dv
 
@@ -166,7 +193,7 @@ def create_environment(df, i_profile):
     return env
 
 
-def estimate_wind_speed_operational_limits(loc='mmc', n_clusters=8, export_operational_limits=True):
+def estimate_wind_speed_operational_limits(n_clusters=8, export_operational_limits=True):
     """Estimate the cut-in and cut-out wind speeds for each wind profile shape. These wind speeds are refined when
     determining the power curves."""
 
@@ -176,6 +203,7 @@ def estimate_wind_speed_operational_limits(loc='mmc', n_clusters=8, export_opera
     res = {'vw_100m_cut_in': [], 'vw_100m_cut_out': [], 'tether_force_cut_in': []}
     input_profiles = pd.read_csv(file_name_profiles, sep=";")
     for i_profile in range(1, n_clusters+1):
+        print('Profile {}'.format(i_profile))
         env = create_environment(input_profiles, i_profile)
 
         # Get cut-in wind speed.
@@ -198,7 +226,7 @@ def estimate_wind_speed_operational_limits(loc='mmc', n_clusters=8, export_opera
 
         env.set_reference_wind_speed(vw_cut_out)
         plt.sca(ax[1])
-        env.plot_wind_profile("{}-{}".format(loc.upper(), i_profile))
+        env.plot_wind_profile("{}".format(i_profile)) #Regional information inlclude here? TODO add region/ensemble Tag?
         plt.legend(bbox_to_anchor=(1.04, 1), loc="upper left")
         plt.ylabel('')
 
@@ -217,7 +245,7 @@ def estimate_wind_speed_operational_limits(loc='mmc', n_clusters=8, export_opera
     if not plots_interactive: plt.savefig(plot_output_file.format(title='estimate_wind_speed_operational_limits'))
 
 
-def generate_power_curves(loc='mmc', n_clusters=8):
+def generate_power_curves(n_clusters=8, run_single_profile=-1):
     """Determine power curves - requires estimates of the cut-in and cut-out wind speed to be available."""
     limit_estimates = pd.read_csv(cut_wind_speeds_file)
 
@@ -246,7 +274,7 @@ def generate_power_curves(loc='mmc', n_clusters=8):
     res_pcs = []
     input_profiles = pd.read_csv(file_name_profiles, sep=";")
     for i_profile in range(1, n_clusters+1):
-        #if i_profile >1: continue #for testing only
+        if run_single_profile != -1 and i_profile != run_single_profile: continue 
         print("Power curve generation for profile number {}".format(i_profile))
         # Pre-configure environment object for optimizations by setting normalized wind profile.
         env = create_environment(input_profiles, i_profile)
@@ -304,24 +332,29 @@ def generate_power_curves(loc='mmc', n_clusters=8):
               "[{:.3f}, {:.3f}].".format(vw_cut_in, vw_cut_out, pc.wind_speeds[0], pc.wind_speeds[-1]))
 
         # mask failed simulation, export only good results
-        mask = [kpis['sim_successful'] for kpis in pc.performance_indicators]
+        sel_succ = [kpis['sim_successful'] for kpis in pc.performance_indicators]
 
         # Plot power curve together with that of the other wind profile shapes.
-        p_cycle = np.array([kpis['average_power']['cycle'] for kpis in pc.performance_indicators])[mask]
+        p_cycle = np.array([kpis['average_power']['cycle'] for kpis in pc.performance_indicators])[sel_succ]
         print('p_cycle: ', p_cycle)
-        mask_power = p_cycle > 0  #TODO  mask negative jumps in power - check reason for negative power/ strong jumps
-        p_cycle_masked = p_cycle[mask_power]
-        wind = pc.wind_speeds[mask_power]
+        # mask negative jumps in power 
+        sel_succ_power = p_cycle > 0  #TODO  - check reason for negative power/ strong jumps
+        if sum(sel_succ_power) != len(sel_succ_power):
+            print(len(sel_succ_power)-sum(sel_succ_power), 'masked negative powers')
+        p_cycle_masked = p_cycle[sel_succ_power]
+        
         #TODO resolve source of problems
         while True:
-            mask_power_disc = [True] + list(np.diff(p_cycle_masked) > -500)
-            p_cycle_masked = p_cycle_masked[mask_power_disc]
-            wind = wind[mask_power_disc]
-            if sum(mask_power_disc) == len(mask_power_disc):
+            sel_succ_power_disc = [True] + list(np.diff(p_cycle_masked) > -1000)
+            sel_succ_power[sel_succ_power==True] = sel_succ_power_disc
+            p_cycle_masked = p_cycle_masked[sel_succ_power_disc]
+            if sum(sel_succ_power_disc) == len(sel_succ_power_disc):
                 # No more discontinuities
                 break
+            print(len(sel_succ_power_disc)-sum(sel_succ_power_disc), 'masked power discontinuities')
                                         
-        
+        p_cycle = p_cycle[sel_succ_power]
+        wind = pc.wind_speeds[sel_succ_power]
         ax_pcs[0].plot(wind, p_cycle_masked/1000, label=i_profile)
         ax_pcs[1].plot(wind/vw_cut_out, p_cycle_masked/1000, label=i_profile)
 
@@ -331,10 +364,11 @@ def generate_power_curves(loc='mmc', n_clusters=8):
                                      [sys_props_v3.reeling_speed_min_limit, sys_props_v3.reeling_speed_max_limit],
                                      plot_info='_profile_{}'.format(i_profile))
 
-        n_cwp = np.array([kpis['n_crosswind_patterns'] for kpis in pc.performance_indicators])[mask]
-        x_opts = np.array(pc.x_opts)[mask]
+        n_cwp = np.array([kpis['n_crosswind_patterns'] for kpis in pc.performance_indicators])[sel_succ][sel_succ_power]
+        x_opts = np.array(pc.x_opts)[sel_succ][sel_succ_power]
         
-        export_to_csv(pc.wind_speeds, vw_cut_out, p_cycle, x_opts, n_cwp, i_profile)
+        export_to_csv(wind, vw_cut_out, p_cycle, x_opts, n_cwp, i_profile)
+    # into funtion: combine single power curve results starting here
     ax_pcs[1].legend()
     ax_pcs[0].set_xlabel('$v_{w,100m}$ [m/s]')
     ax_pcs[1].set_xlabel('$v_{w,100m}/v_{cut-out}$ [-]')
@@ -354,7 +388,7 @@ def generate_power_curves(loc='mmc', n_clusters=8):
     return res_pcs
 
 
-def load_power_curve_results_and_plot_trajectories(loc='mmc', n_clusters=8, i_profile=1):
+def load_power_curve_results_and_plot_trajectories(n_clusters=8, i_profile=1):
     """Plot trajectories from previously generated power curve."""
     pc = PowerCurveConstructor(None)
     pc.import_results(power_curve_output_file_name.format(i_profile, 'pickle'))
@@ -368,9 +402,9 @@ def compare_kpis(power_curves):
     """Plot how performance indicators change with wind speed for all generated power curves."""
     fig_nums = [plt.figure().number for _ in range(5)]
     for idx, pc in enumerate(power_curves):
-        mask = [kpis['sim_successful'] for kpis in pc.performance_indicators]
-        performance_indicators_success = [kpis for i, kpis in enumerate(pc.performance_indicators) if mask[i]]
-        x_opts_success = [x_opt for i, x_opt in enumerate(pc.x_opts) if mask[i]]
+        sel_succ = [kpis['sim_successful'] for kpis in pc.performance_indicators]
+        performance_indicators_success = [kpis for i, kpis in enumerate(pc.performance_indicators) if sel_succ[i]]
+        x_opts_success = [x_opt for i, x_opt in enumerate(pc.x_opts) if sel_succ[i]]
 
         plt.figure(fig_nums[0])
         f_out_min = [kpis['min_tether_force']['out'] for kpis in performance_indicators_success]
@@ -430,7 +464,7 @@ def compare_kpis(power_curves):
 
 
 def interpret_input_args():
-    estimate_cut_in_out, make_power_curves = (False, False)
+    estimate_cut_in_out, make_power_curves, run_single_profile = (False, False, -1)
     if len(sys.argv) > 1:  # User input was given
         help = """
         python power_curves.py                  : run qsm to estimate the cut-in and cut-out wind speeds and power curves for the resulting range of absolute wind speeds
@@ -439,7 +473,7 @@ def interpret_input_args():
         python power_curves.py -h               : display this help
         """
         try:
-            opts, args = getopt.getopt(sys.argv[1:], "hpc", ["help", "power", "cut"])
+            opts, args = getopt.getopt(sys.argv[1:], "hpcs:", ["help", "power", "cut", "single="])
         except getopt.GetoptError:  # User input not given correctly, display help and end
             print(help)
             sys.exit()
@@ -451,22 +485,24 @@ def interpret_input_args():
                 make_power_curves = True
             elif opt in ("-c", "--cut"):  
                 estimate_cut_in_out = True
+            elif opt in ("-s", "--single"):  
+                run_single_profile = int(arg)
     else:
         estimate_cut_in_out, make_power_curves = (True, True)
 
-    return estimate_cut_in_out, make_power_curves
+    return estimate_cut_in_out, make_power_curves, run_single_profile
 
 
 if __name__ == '__main__':
     # Read program parameters 
-    estimate_cut_in_out, make_power_curves = interpret_input_args()
+    estimate_cut_in_out, make_power_curves, run_single_profile = interpret_input_args()
 
     import time
     since = time.time()
     if estimate_cut_in_out:
-        estimate_wind_speed_operational_limits(n_clusters=n_clusters, loc='mmc')
+        estimate_wind_speed_operational_limits(n_clusters=n_clusters)
     if make_power_curves:
-        pcs = generate_power_curves(loc='mmc', n_clusters=n_clusters)
+        pcs = generate_power_curves(n_clusters=n_clusters, run_single_profile=run_single_profile)
         compare_kpis(pcs)
     
     time_elapsed = time.time() - since
